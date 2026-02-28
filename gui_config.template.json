@@ -117,5 +117,7 @@
   "regime_long_penalty_trend_down": -0.10,
   "symbol_reentry_cooldown_sec": 120,
   "chop_max_open_symbols": 2,
+  "chop_composite_min_score": 0.85,
+  "chop_position_pct_mult": 0.5,
   "binance_referral_code": "AUTO2026"
 }

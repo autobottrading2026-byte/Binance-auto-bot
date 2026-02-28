@@ -3889,6 +3889,9 @@ class TickEngine:
                     else:
                         composite += float(getattr(self.config, "regime_long_penalty_trend_down", -0.10))
             min_composite = float(getattr(self.config, "composite_min_score", 0.72))  # [PATCH-9] 0.75→0.72
+            # [PATCH-12] chop 레짐에서 진입 임계값 상향
+            if regime == "chop":
+                min_composite = float(getattr(self.config, "chop_composite_min_score", 0.85))
             if composite < min_composite:
                 return None, self._ko(f"복합 스코어 부족 ({composite:.2f} < {min_composite})", f"Composite score too low ({composite:.2f} < {min_composite})")
             strength = min(composite, 5.0)
@@ -4106,6 +4109,14 @@ class TickEngine:
         available_balance = await self._get_available_balance()
         # Kelly 사이징: 실적 기반 동적 포지션 비율 (데이터 부족 시 config 값 사용)
         position_pct = max(0.0, self._kelly_position_pct())
+        # [PATCH-12] chop 레짐에서 포지션 사이즈 축소
+        _cur_regime_pos = ""
+        if hasattr(self, "auto_tuner") and self.auto_tuner:
+            _cur_regime_pos = getattr(self.auto_tuner, "current_regime", "") or ""
+        if _cur_regime_pos == "chop":
+            _chop_mult = float(getattr(self.config, "chop_position_pct_mult", 0.5))
+            position_pct *= _chop_mult
+            logger.info("CHOP_POSITION_REDUCE %s pct=%.4f mult=%.2f", snap.symbol, position_pct, _chop_mult)
         available_notional = available_balance * position_pct
         if position_pct <= 0 or available_balance <= 0 or available_notional <= 0:
             detail = f"balance={available_balance:.2f} pct={position_pct:.4f}"

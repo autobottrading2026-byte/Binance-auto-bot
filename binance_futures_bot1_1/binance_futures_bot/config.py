@@ -366,6 +366,10 @@ class EngineConfig:
     # ── [PATCH-11] chop 레짐 동시 포지션 제한 ──
     chop_max_open_symbols: int = 2               # chop에서 max_open_symbols 2로 제한
 
+    # ── [PATCH-12] chop 레짐 진입 강화 ──
+    chop_composite_min_score: float = 0.85       # chop에서 진입 임계값 상향 (일반 0.72 → 0.85)
+    chop_position_pct_mult: float = 0.5          # chop에서 포지션 사이즈 50%로 축소
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 📋 전체 변경 사항 요약
