@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Logs & Runtime
+*.log
+binance_futures_bot1_1/logs/metrics.jsonl
+binance_futures_bot1_1/logs/notifications.log
+binance_futures_bot1_1/logs/consent_audit.log
+binance_futures_bot1_1/logs/neural_scorer.json
+binance_futures_bot1_1/logs/auto_tuner_state.json
+gui_startup.log
+gui_state.json
+
+# Backups
+backup_*/
+
+# Reports (generated)
+*.docx
+analysis_report.md
+
+# Sensitive
+.env
+*.env
+credentials.*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

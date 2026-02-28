@@ -1,0 +1,6 @@
+# Binance Auto Trading Bot - Dependencies
+# Python >= 3.9 required
+
+python-binance>=1.0.19
+numpy>=1.23.0
+cryptography>=41.0.0
