@@ -4,7 +4,7 @@
   "fallback_api_key": "",
   "fallback_api_secret": "",
   "order_alerts": true,
-  "default_env_testnet": true,
+  "default_env_testnet": false,
   "autostart": false,
   "use_rotation_warmup": false,
   "spike_guard_pct": 7.0,
@@ -41,7 +41,7 @@
   "session_loss_window_minutes": 1440,
   "kill_switch_cooldown_min": 30,
   "sidebar_manual_expanded": true,
-  "risk_acknowledged": false,
+  "risk_acknowledged": true,
   "auto_boost_position_pct": true,
   "maker_fee_pct": 0.0002,
   "taker_fee_pct": 0.0005,
@@ -51,9 +51,18 @@
   "enable_atr_trailing_stop": true,
   "enable_progress_stop": true,
   "partial_tp_levels": [
-    { "r": 0.5, "close_frac": 0.30 },
-    { "r": 1.0, "close_frac": 0.30 },
-    { "r": 1.8, "close_frac": 0.40 }
+    {
+      "r": 0.5,
+      "close_frac": 0.3
+    },
+    {
+      "r": 1.0,
+      "close_frac": 0.3
+    },
+    {
+      "r": 1.8,
+      "close_frac": 0.4
+    }
   ],
   "trail_atr_period": 22,
   "trail_atr_mult": 1.7,
@@ -66,10 +75,10 @@
   "progress_stop_min_pnl_pct": 0.05,
   "progress_stop_action": "partial_or_full",
   "ui_language": "ko",
-  "risk_ack1": false,
+  "risk_ack1": true,
   "expert_mode_enabled": false,
-  "risk_ack2": false,
-  "consent_version": "",
+  "risk_ack2": true,
+  "consent_version": "v1.1-d8de2b46",
   "limit_exit_offset_bps": 5.0,
   "default_card_modes": {
     "card0": "unrealized_total",
@@ -112,12 +121,13 @@
   "limit_exit_max_attempts": 4,
   "regime_direction_bias_enabled": true,
   "regime_long_bonus_trend_up": 0.15,
-  "regime_short_penalty_trend_up": -0.10,
+  "regime_short_penalty_trend_up": -0.1,
   "regime_short_bonus_trend_down": 0.15,
-  "regime_long_penalty_trend_down": -0.10,
+  "regime_long_penalty_trend_down": -0.1,
   "symbol_reentry_cooldown_sec": 120,
   "chop_max_open_symbols": 2,
   "chop_composite_min_score": 0.85,
   "chop_position_pct_mult": 0.5,
-  "binance_referral_code": "AUTO2026"
+  "binance_referral_code": "AUTO2026",
+  "referral_onboarding_shown": true
 }

@@ -23,6 +23,24 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 APP_VERSION = "1.1.0"
 APP_NAME = "Binance Auto Trading Bot"
 GITHUB_REPO = "autobottrading2026-byte/Binance-auto-bot"
+# ── 레퍼럴 코드 난독화 + 무결성 체크 ──
+import base64 as _b64, hashlib as _hl
+_REF_ENC = "QVVUT zIwMjY="  # base64 인코딩된 레퍼럴 코드 (공백 삽입 난독화)
+_REF_HASH = "9a61a4dc110e084e"  # 원본 해시 앞 16자리
+def _decode_ref() -> str:
+    raw = _b64.b64decode(_REF_ENC.replace(" ", "")).decode()
+    h = _hl.sha256(raw.encode()).hexdigest()[:16]
+    if h != _REF_HASH:
+        return ""
+    return raw
+REFERRAL_CODE = _decode_ref()
+
+# ── Lemon Squeezy 결제 링크 (프리미엄 구독) ──
+LEMONSQUEEZY_MONTHLY_URL = ""  # TODO: Lemon Squeezy Payment Link 생성 후 입력
+LEMONSQUEEZY_YEARLY_URL  = ""  # TODO: Lemon Squeezy Payment Link 생성 후 입력
+PREMIUM_PRICE_MONTHLY = "$9.99"
+PREMIUM_PRICE_YEARLY  = "$99/yr"
+
 BOT_ROOT = os.path.join(BASE_DIR, "binance_futures_bot1_1")
 
 # binance_futures_bot1_1 패키지를 찾을 수 있도록 BASE_DIR을 sys.path 최우선에 추가
@@ -87,7 +105,7 @@ class BotGUI:
             "neural_scorer_enabled": False,
             "neural_license_key": "",
             "consent_version": "",
-            "binance_referral_code": "",
+            "binance_referral_code": REFERRAL_CODE,
             "maker_fee_pct": 0.0002,
             "taker_fee_pct": 0.0005,
             "limit_exit_offset_bps": 2.0,
@@ -743,10 +761,28 @@ class BotGUI:
         self._build_manual_panel()
         self._build_positions_panel()
         self._add_settings_button()
+        # [PATCH-12] 레퍼럴 코드 무결성 체크
+        if not REFERRAL_CODE:
+            self.root.after(200, self._show_integrity_warning)
         # [PATCH-11] 첫 실행 시 레퍼럴 가입 안내
         self.root.after(500, self._show_referral_onboarding)
         # [PATCH-11] 자동 업데이트 체크
         self.root.after(3000, self._check_for_updates)
+
+    def _show_integrity_warning(self):
+        """레퍼럴 코드 변조 감지 시 경고."""
+        from tkinter import messagebox as _mb
+        _is_ko = self.language == "ko"
+        _mb.showwarning(
+            "무결성 경고" if _is_ko else "Integrity Warning",
+            ("이 프로그램은 비공식 수정 버전일 수 있습니다.\n"
+             "공식 버전을 다운로드하세요:\n"
+             f"https://github.com/{GITHUB_REPO}/releases")
+            if _is_ko else
+            ("This program may be an unofficial modified version.\n"
+             "Please download the official version:\n"
+             f"https://github.com/{GITHUB_REPO}/releases")
+        )
 
     def _show_referral_onboarding(self):
         """신규 사용자(API 키 미설정)에게 레퍼럴 링크로 가입 유도."""
@@ -3076,48 +3112,34 @@ class BotGUI:
                  bg="#1c1f2b", fg="#f5f7ff",
                  font=("Malgun Gothic", 10, "bold"), anchor="w"
                  ).pack(side=tk.LEFT)
-        _ref_var = tk.StringVar(value=self.settings_data.get("binance_referral_code", ""))
+        # [PATCH-12] 레퍼럴 코드 고정 표시 (읽기 전용)
+        self.settings_data["binance_referral_code"] = REFERRAL_CODE
+        _ref_var = tk.StringVar(value=REFERRAL_CODE)
         _ref_entry = tk.Entry(ref_inner, textvariable=_ref_var, width=20,
                               bg="#0D1117", fg="#f5f7ff",
                               insertbackground="#f5f7ff",
                               relief="flat", font=("Courier New", 10),
-                              highlightbackground="#343942", highlightthickness=1)
+                              highlightbackground="#343942", highlightthickness=1,
+                              state="readonly", readonlybackground="#0D1117")
         _ref_entry.pack(side=tk.LEFT, padx=(12, 8))
         _ref_msg = tk.Label(ref_inner, text="", bg="#1c1f2b", fg="#888e9e",
                             font=("Malgun Gothic", 9))
         _ref_msg.pack(side=tk.LEFT, padx=(4, 0))
 
-        def _save_referral():
-            code = _ref_var.get().strip()
-            self.settings_data["binance_referral_code"] = code
-            self._save_json(CONFIG_PATH, self.settings_data)
-            if code:
-                _ref_msg.configure(
-                    text=f"✅ {'저장됨' if _is_ko else 'Saved'}: {code}",
-                    fg="#2EBD85")
-            else:
-                _ref_msg.configure(
-                    text="코드가 비어있습니다" if _is_ko else "Code is empty",
-                    fg="#F6465D")
-
-        tk.Button(ref_inner,
-                  text="저장" if _is_ko else "Save",
-                  command=_save_referral,
-                  bg="#F0B90B", fg="#181A20",
-                  activebackground="#d9a80a", relief="flat",
-                  font=("Malgun Gothic", 9, "bold"), cursor="hand2",
-                  padx=10, pady=2
-                  ).pack(side=tk.LEFT, padx=(4, 0))
-
-        _cur_ref = self.settings_data.get("binance_referral_code", "")
-        if _cur_ref:
-            _ref_msg.configure(
-                text=f"✅ {'적용 중' if _is_ko else 'Active'}: {_cur_ref}",
-                fg="#2EBD85")
-        else:
-            _ref_msg.configure(
-                text="미설정 — 신규 사용자 가입 시 수수료 커미션을 받을 수 없습니다" if _is_ko else "Not set — no commission from new users",
+        _ref_msg.configure(
+            text=f"🔒 {'고정됨' if _is_ko else 'Fixed'}: {REFERRAL_CODE}",
                 fg="#888e9e")
+
+        # [PATCH-12] 레퍼럴 혜택 안내
+        _benefit_text = (
+            "💰 이 코드로 가입 시 선물 거래 수수료 5% 할인 혜택이 적용됩니다"
+            if _is_ko else
+            "💰 Sign up with this code to get 5% off on futures trading fees"
+        )
+        tk.Label(ref_frame, text=_benefit_text,
+                 bg="#1c1f2b", fg="#F0B90B",
+                 font=("Malgun Gothic", 9), anchor="w"
+                 ).pack(fill="x", padx=16, pady=(0, 10))
 
         tk.Label(frame, text=self._t("default_env_title","기본 실행 환경"), bg="#181A20", fg="#c0c6dc", font=("Malgun Gothic", 10, "bold"), anchor="w").pack(fill="x", padx=40, pady=(20, 6))
         current_env = self.env_mode if self.env_mode in {"TESTNET", "LIVE"} else ("TESTNET" if self.settings_data.get("default_env_testnet", True) else "LIVE")
@@ -5512,40 +5534,59 @@ class BotGUI:
 
         tk.Label(pay_body,
                  text=(
-                     "결제 완료 후 이메일로 라이선스 키를 발급해 드립니다.\n아래 버튼으로 구매 페이지로 이동하거나, 이미 키가 있으면 바로 입력하세요."
+                     "결제 완료 후 이메일로 라이선스 키를 발급해 드립니다.\n아래에서 구독 플랜을 선택하거나, 이미 키가 있으면 바로 입력하세요."
                      if _is_ko else
-                     "A license key will be sent to your email after payment.\nClick the button below to visit the purchase page, or enter your key directly if you already have one."
+                     "A license key will be sent to your email after payment.\nChoose a subscription plan below, or enter your key directly if you already have one."
                  ),
                  bg=CARD, fg=MUTED, font=("Malgun Gothic", 8),
                  anchor="w", justify="left", wraplength=550
         ).pack(fill="x", padx=16, pady=(4,8))
 
+        # ── [PATCH-12] Lemon Squeezy 구독 버튼 (월/연) ──
         pay_btns = tk.Frame(pay_body, bg=CARD)
-        pay_btns.pack(fill="x", padx=14, pady=(0,8))
+        pay_btns.pack(fill="x", padx=14, pady=(0,4))
 
-        PURCHASE_URL = "https://your-payment-page.com/neural-scorer"
-
-        def _open_purchase():
+        def _open_payment(url, plan_name):
+            if not url:
+                messagebox.showinfo(
+                    "준비 중" if _is_ko else "Coming Soon",
+                    ("결제 시스템 준비 중입니다. 곧 오픈 예정입니다!"
+                     if _is_ko else
+                     "Payment system is being prepared. Coming soon!"),
+                    parent=frame.winfo_toplevel())
+                return
             try:
-                webbrowser.open(PURCHASE_URL)
+                webbrowser.open(url)
             except Exception:
                 messagebox.showinfo(
                     "Purchase Link" if self.language == "en" else "구매 링크",
-                    (f"Visit the following URL:\n{PURCHASE_URL}" if self.language == "en"
-                     else f"아래 주소로 접속하세요:\n{PURCHASE_URL}"),
+                    (f"Visit the following URL:\n{url}" if self.language == "en"
+                     else f"아래 주소로 접속하세요:\n{url}"),
                     parent=frame.winfo_toplevel())
 
         tk.Button(pay_btns,
-                  text="💳  구매하기 (외부 결제)" if _is_ko else "💳  Purchase (External)",
-                  command=_open_purchase,
+                  text=f"💳  월간 구독 ({PREMIUM_PRICE_MONTHLY}/월)" if _is_ko else f"💳  Monthly ({PREMIUM_PRICE_MONTHLY}/mo)",
+                  command=lambda: _open_payment(LEMONSQUEEZY_MONTHLY_URL, "monthly"),
+                  bg="#F0B90B", fg="#181A20",
+                  activebackground="#d9a80a", activeforeground="#181A20",
+                  relief="flat", cursor="hand2",
+                  font=("Malgun Gothic", 9, "bold"), padx=16, pady=6
+        ).pack(side=tk.LEFT, padx=(0,8))
+
+        tk.Button(pay_btns,
+                  text=f"💎  연간 구독 ({PREMIUM_PRICE_YEARLY} · 17% 할인)" if _is_ko else f"💎  Yearly ({PREMIUM_PRICE_YEARLY} · 17% off)",
+                  command=lambda: _open_payment(LEMONSQUEEZY_YEARLY_URL, "yearly"),
                   bg=LOCK_C, fg="white",
                   activebackground="#e5541e", activeforeground="white",
                   relief="flat", cursor="hand2",
                   font=("Malgun Gothic", 9, "bold"), padx=16, pady=6
         ).pack(side=tk.LEFT, padx=(0,8))
 
-        tk.Label(pay_btns,
-                 text="결제 후 이메일로 키를 받으세요" if _is_ko else "You will receive the key by email after payment",
+        # 구독 안내 라벨
+        pay_info = tk.Frame(pay_body, bg=CARD)
+        pay_info.pack(fill="x", padx=14, pady=(2,8))
+        tk.Label(pay_info,
+                 text="💡 결제 후 이메일로 라이선스 키가 발송됩니다 · 언제든 해지 가능" if _is_ko else "💡 License key sent via email after payment · Cancel anytime",
                  bg=CARD, fg=MUTED, font=("Malgun Gothic", 8)
         ).pack(side=tk.LEFT)
 
