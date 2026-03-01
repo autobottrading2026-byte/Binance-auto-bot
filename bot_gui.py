@@ -20,7 +20,7 @@ from collections import deque
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 # ── [PATCH-11] 버전 관리 ──
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.0"
 APP_NAME = "Binance Auto Trading Bot"
 GITHUB_REPO = "autobottrading2026-byte/Binance-auto-bot"
 # ── 레퍼럴 코드 난독화 + 무결성 체크 ──
@@ -1576,7 +1576,7 @@ class BotGUI:
                 "overview",
                 _t("개요", "Overview"),
                 _t(
-                    "이 UI는 Binance USDT-M 선물 자동매매 엔진(v1.1.1)을 운영·모니터링하는 콘솔입니다.\n\n"
+                    "이 UI는 Binance USDT-M 선물 자동매매 엔진(v1.1.0)을 운영·모니터링하는 콘솔입니다.\n\n"
                     "• START/STOP으로 엔진 프로세스를 제어합니다.\n"
                     "• 프리셋(공격/기본/보수) 버튼으로 자동매매 전략을 전환합니다.\n"
                     "• Auto-tune이 켜져 있으면 시장 상황에 따라 파라미터가 자동 조정됩니다.\n"
@@ -1589,7 +1589,7 @@ class BotGUI:
                     "  필수 동의  — 리스크 경고 동의 (2항목 모두 체크 필요)\n"
                     "  프리미엄  — Neural Scorer 라이선스 키 입력, 구독 결제\n"
                     "  정보      — 프로그램 정보, 버전, 문의 이메일",
-                    "This UI is an operations console for the Binance USDT-M Futures auto-trading engine (v1.1.1).\n\n"
+                    "This UI is an operations console for the Binance USDT-M Futures auto-trading engine (v1.1.0).\n\n"
                     "• START/STOP controls the engine process.\n"
                     "• Use preset buttons (Aggressive / Balanced / Conservative) to switch strategy.\n"
                     "• When Auto-tune is ON, parameters adjust automatically based on market conditions.\n"
