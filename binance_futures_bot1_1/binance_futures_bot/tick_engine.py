@@ -798,21 +798,17 @@ class TickEngine:
             active_params = active_snapshot.get("params")
             if isinstance(active_params, dict):
                 loaded = dict(active_params)
-                # watch_limit / max_open_symbols는 사용자 설정값 유지
-                # (auto-tune이 과거에 낮췄더라도 복원 시 덮어쓰지 않음)
-                # watch_limit/max_open_symbols: 사용자 원본값 또는 현재 config값 중 큰 것 사용
-                _wl_restore = max(
-                    getattr(self, "_user_watch_limit", 0),
-                    int(getattr(self.config, "watch_limit", 10))
-                )
-                _mo_restore = max(
-                    getattr(self, "_user_max_open_symbols", 0),
-                    int(getattr(self.config, "max_open_symbols", 10))  # [PATCH-14] 5→10 config 정렬
-                )
-                if _wl_restore > 0:
-                    loaded["watch_limit"] = _wl_restore
-                if _mo_restore > 0:
-                    loaded["max_open_symbols"] = _mo_restore
+                # [PATCH-15] watch_limit/max_open_symbols: auto-tune 대상 아님
+                # 항상 config 기본값 이상으로 강제 (state에 잔존하는 낮은 값 무시)
+                _wl_config = int(getattr(self.config, "watch_limit", 10))
+                _mo_config = int(getattr(self.config, "max_open_symbols", 10))
+                _wl_user = getattr(self, "_user_watch_limit", 0)
+                _mo_user = getattr(self, "_user_max_open_symbols", 0)
+                _wl_floor = max(_wl_config, _wl_user)
+                _mo_floor = max(_mo_config, _mo_user)
+                # state에 있는 값이 floor보다 낮으면 강제 교체
+                loaded["watch_limit"] = max(int(loaded.get("watch_limit", _wl_floor)), _wl_floor)
+                loaded["max_open_symbols"] = max(int(loaded.get("max_open_symbols", _mo_floor)), _mo_floor)
                 # [PATCH-13c] 로드된 파라미터를 config 기본값 범위로 클램핑
                 # Auto-Tuner state에 저장된 과거 잘못된 값이 config 변경을 무시하지 않도록
                 _cfg_caps = {
@@ -858,13 +854,34 @@ class TickEngine:
                 tuner.current_mode = mode_value
                 tuner._apply_mode_profile()
 
+    @staticmethod
+    def _sanitize_lifecycle(lifecycle: dict) -> dict:
+        """[PATCH-15] lifecycle 저장 시 watch_limit/max_open_symbols 제거.
+        이 값들은 auto-tune 대상이 아니며, config 기본값을 사용해야 함.
+        lifecycle에 잔존하면 재시작 시 오래된 값(5, 3 등)이 복원됨."""
+        _remove_keys = ("watch_limit", "max_open_symbols")
+        sanitized = {}
+        for stage_name, stage_data in lifecycle.items():
+            if stage_data is None:
+                sanitized[stage_name] = None
+                continue
+            stage_copy = dict(stage_data)
+            if "params" in stage_copy and isinstance(stage_copy["params"], dict):
+                stage_copy["params"] = {
+                    k: v for k, v in stage_copy["params"].items()
+                    if k not in _remove_keys
+                }
+            sanitized[stage_name] = stage_copy
+        return sanitized
+
     def _persist_auto_tuner_state(self):
         if not self.auto_tuner:
             return
         payload = {
             "version": self.auto_tuner.lifecycle_meta.get("version", 1),
             "updated_at": self.auto_tuner.lifecycle_meta.get("updated_at", time.time()),
-            "lifecycle": self.auto_tuner.lifecycle,
+            # [PATCH-15] lifecycle 내 watch_limit/max_open_symbols 잔존값 제거
+            "lifecycle": self._sanitize_lifecycle(self.auto_tuner.lifecycle),
             "meta": self.auto_tuner.lifecycle_meta,
             "shadow_active": self.auto_tuner.state.shadow.active,
             "cooldown_until": self.auto_tuner.state.cooldown_until,
@@ -2010,13 +2027,9 @@ class TickEngine:
             # [PATCH-8] 손절 상한 5.0→2.5%: auto-tuner가 손절폭을 넓히지 못하게
             raw_sl = max(0.5, min(2.2, float(params["max_loss_per_position"])))  # [PATCH-14] 2.5→2.2 HARD_CAPS 정렬
             self._assign_rate_limited("max_loss_per_position", raw_sl)
-        # watch_limit / max_open_symbols: 사용자 설정값이 있으면 그것을 우선 사용
-        # (auto-tune 적용 후에도 사용자가 UI에서 지정한 값 아래로 내려가지 않도록)
-        _user_wl = getattr(self, "_user_watch_limit", 0)
-        _user_mo = getattr(self, "_user_max_open_symbols", 0)
-        # [PATCH-13c] config 기본값을 floor로 사용 (auto-tune이 줄이지 못하도록)
-        _wl_floor = max(int(getattr(self.config, "watch_limit", 10)), _user_wl) if _user_wl > 0 else int(getattr(self.config, "watch_limit", 10))
-        _mo_floor = max(int(getattr(self.config, "max_open_symbols", 10)), _user_mo) if _user_mo > 0 else int(getattr(self.config, "max_open_symbols", 10))
+        # [PATCH-15] watch_limit/max_open_symbols: auto-tune 대상 아님, 항상 config 이상 유지
+        _wl_floor = max(int(getattr(self.config, "watch_limit", 10)), getattr(self, "_user_watch_limit", 0))
+        _mo_floor = max(int(getattr(self.config, "max_open_symbols", 10)), getattr(self, "_user_max_open_symbols", 0))
         self.config.watch_limit = max(_wl_floor, self.config.watch_limit)
         self.config.max_open_symbols = max(_mo_floor, self.config.max_open_symbols)
         # [PATCH-14] HARD_CAPS 참조로 변경 (하드코딩 제거)

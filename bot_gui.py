@@ -2964,10 +2964,11 @@ class BotGUI:
                         
                         for t in trades:
                             ts = datetime.fromtimestamp(t.get('ts', 0)).strftime('%Y-%m-%d %H:%M:%S')
-                            pnl = t.get('pnl', 0)
+                            # [PATCH-15] pnl은 이미 수수료 차감된 순손익임
+                            net_pnl = t.get('pnl', 0)
                             fee = t.get('fee_amount', 0)
-                            net_pnl = pnl - fee
-                            
+                            gross_pnl = net_pnl + fee  # 수수료 전 = 순손익 + 수수료
+
                             writer.writerow({
                                 '시각': ts,
                                 '심볼': t.get('symbol', ''),
@@ -2975,7 +2976,7 @@ class BotGUI:
                                 '수량': t.get('quantity', 0),
                                 '진입가': t.get('entry_price', 0),
                                 '청산가': t.get('exit_price', 0),
-                                '손익(수수료 전)': f"{pnl:.4f}",
+                                '손익(수수료 전)': f"{gross_pnl:.4f}",
                                 '수수료': f"{fee:.4f}",
                                 '순손익(수수료 후)': f"{net_pnl:.4f}",
                                 'ROI(%)': f"{t.get('roi_pct', 0):.2f}",
@@ -3028,10 +3029,11 @@ class BotGUI:
                     # 데이터
                     for t in trades:
                         ts = datetime.fromtimestamp(t.get('ts', 0)).strftime('%Y-%m-%d %H:%M:%S')
-                        pnl = t.get('pnl', 0)
+                        # [PATCH-15] pnl은 이미 수수료 차감된 순손익임
+                        net_pnl = t.get('pnl', 0)
                         fee = t.get('fee_amount', 0)
-                        net_pnl = pnl - fee
-                        
+                        gross_pnl = net_pnl + fee  # 수수료 전 = 순손익 + 수수료
+
                         row = [
                             ts,
                             t.get('symbol', ''),
@@ -3039,7 +3041,7 @@ class BotGUI:
                             t.get('quantity', 0),
                             t.get('entry_price', 0),
                             t.get('exit_price', 0),
-                            pnl,
+                            gross_pnl,
                             fee,
                             net_pnl,
                             t.get('roi_pct', 0),
@@ -9876,36 +9878,23 @@ class BotGUI:
                 pass
 
     def _calc_unrealized_net(self) -> float:
-        """현재 포지션 미실현 손익에서 진입+청산 수수료를 차감한 순 손익.
+        """현재 포지션 미실현 손익에서 예상 청산 수수료만 차감.
 
-        ═══════════════════════════════════════════════════════════
-        🔧 수정: 진입 + 청산 수수료 모두 테이커 기준 (0.05%)
-        ═══════════════════════════════════════════════════════════
-        - 진입 수수료: 테이커 0.05%
-        - 청산 수수료: 테이커 0.05%
-        - 보수적 계산: 실제보다 약간 적게 보여주어 안전 마진 확보
+        [PATCH-15] 바이낸스 unRealizedProfit은 수수료 미포함 순 가격차이.
+        진입 수수료는 이미 지불 완료 → 중복 차감하면 안 됨.
+        청산 수수료(예상)만 보수적으로 차감.
         """
-        # maker_fee = float(self.settings_data.get("maker_fee_pct", 0.0002) or 0.0002)
         taker_fee = float(self.settings_data.get("taker_fee_pct", 0.0005) or 0.0005)
-        # maker_first = bool(self.settings_data.get("maker_first_enabled", True))
         total_net = 0.0
         for pos in self.current_positions.values():
             try:
                 unrealized = float(pos.get("unRealizedProfit", 0.0))
                 qty        = abs(float(pos.get("amount", 0.0)))
-                entry_px   = float(pos.get("entryPrice", 0.0) or 0.0)
-                mark_price = float(pos.get("markPrice", 0.0) or entry_px)
-                
-                # ═══════════════════════════════════════════════════════════
-                # 🔧 수정: 진입 + 청산 모두 테이커 수수료 적용
-                # ═══════════════════════════════════════════════════════════
-                # 진입 수수료: 테이커 0.05%
-                entry_fee  = qty * entry_px  * taker_fee
-                
-                # 청산 수수료: 테이커 0.05%
-                exit_fee   = qty * mark_price * taker_fee
-                
-                total_net += unrealized - entry_fee - exit_fee
+                mark_price = float(pos.get("markPrice", 0.0) or 0.0)
+
+                # [PATCH-15] 청산 수수료(예상)만 차감 — 진입 수수료는 이미 지불됨
+                exit_fee = qty * mark_price * taker_fee
+                total_net += unrealized - exit_fee
             except (TypeError, ValueError):
                 continue
         return total_net
