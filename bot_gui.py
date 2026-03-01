@@ -3088,19 +3088,110 @@ class BotGUI:
         canvas.bind_all("<MouseWheel>", _env_mousewheel, add="+")
 
         # 이하 body에 pack (기존 frame → body로 변경)
+        _is_ko = self.language == "ko"
         entry_pad = {"padx": 40, "pady": (0, 10)}
 
-        tk.Label(body, text=self._t("api_settings_title","API 설정"), bg="#181A20", fg="white", font=("Malgun Gothic", 13, "bold"), anchor="w").pack(fill="x", padx=40, pady=(30, 12))
-        guidance = self._t("env_guidance", "")
-        tk.Label(
-            body,
-            text=guidance,
-            bg="#181A20",
-            fg="#c0c6dc",
-            font=("Malgun Gothic", 10),
-            justify="left",
-            wraplength=720,
-        ).pack(fill="x", padx=40, pady=(0, 12))
+        # ── 환경변수 설정 가이드 (최상단) ──
+        tk.Label(body,
+                 text="환경변수 설정 방법" if _is_ko else "How to Set Environment Variables",
+                 bg="#181A20", fg="white",
+                 font=("Malgun Gothic", 13, "bold"), anchor="w"
+                 ).pack(fill="x", padx=40, pady=(30, 4))
+        tk.Label(body,
+                 text=("이 버전부터 API 키/시크릿은 프로그램 안에서 입력하지 않습니다.\n"
+                       "Windows 환경 변수에 아래 키를 등록한 뒤 GUI를 다시 시작해 주세요."
+                       if _is_ko else
+                       "From this version, API keys are not entered inside the program.\n"
+                       "Register the keys below as Windows environment variables, then restart the GUI."),
+                 bg="#181A20", fg="#c0c6dc",
+                 font=("Malgun Gothic", 10), justify="left", wraplength=720, anchor="w"
+                 ).pack(fill="x", padx=40, pady=(0, 12))
+
+        # 단계별 가이드
+        _guide_frame = tk.Frame(body, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
+        _guide_frame.pack(fill="x", padx=40, pady=(0, 8))
+
+        if _is_ko:
+            _steps = [
+                ("①", "Windows 검색창에 '환경 변수' 입력 → '시스템 환경 변수 편집' 클릭"),
+                ("②", "'환경 변수(N)...' 버튼 클릭"),
+                ("③", "'사용자 변수' 영역에서 '새로 만들기(N)...' 클릭"),
+                ("④", "아래 변수명과 값을 하나씩 추가 (총 4개)"),
+                ("⑤", "모두 입력 후 '확인' 버튼 클릭 (모든 창 닫기)"),
+                ("⑥", "이 프로그램을 완전히 종료한 후 다시 실행"),
+            ]
+        else:
+            _steps = [
+                ("①", "Search 'Environment Variables' in Windows → 'Edit system environment variables'"),
+                ("②", "Click 'Environment Variables...' button"),
+                ("③", "Under 'User variables', click 'New...'"),
+                ("④", "Add the following variables one by one (4 total)"),
+                ("⑤", "Click 'OK' on all dialogs"),
+                ("⑥", "Close and restart this program"),
+            ]
+
+        for _num, _desc in _steps:
+            _step_row = tk.Frame(_guide_frame, bg="#1c1f2b")
+            _step_row.pack(fill="x", padx=16, pady=3)
+            tk.Label(_step_row, text=_num, bg="#1c1f2b", fg="#F0B90B",
+                     font=("Malgun Gothic", 10, "bold"), width=3, anchor="e"
+                     ).pack(side=tk.LEFT, padx=(0, 8))
+            tk.Label(_step_row, text=_desc, bg="#1c1f2b", fg="#f5f7ff",
+                     font=("Malgun Gothic", 10), anchor="w"
+                     ).pack(side=tk.LEFT, fill="x", expand=True)
+        tk.Frame(_guide_frame, bg="#1c1f2b", height=6).pack()
+
+        # 변수명 테이블
+        _var_table_frame = tk.Frame(body, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
+        _var_table_frame.pack(fill="x", padx=40, pady=(0, 8))
+
+        _tbl_hdr = tk.Frame(_var_table_frame, bg="#0D1117")
+        _tbl_hdr.pack(fill="x", padx=1, pady=(1, 0))
+        for _col_text, _col_w in [("환경" if _is_ko else "Env", 8),
+                                   ("변수명" if _is_ko else "Variable Name", 28),
+                                   ("값" if _is_ko else "Value", 30)]:
+            tk.Label(_tbl_hdr, text=_col_text, bg="#0D1117", fg="#F0B90B",
+                     font=("Malgun Gothic", 9, "bold"), width=_col_w, anchor="w"
+                     ).pack(side=tk.LEFT, padx=4, pady=4)
+
+        _var_rows = [
+            ("TESTNET", "TESTNET_API_KEY",
+             "테스트넷 API Key" if _is_ko else "Testnet API Key"),
+            ("TESTNET", "TESTNET_API_SECRET",
+             "테스트넷 Secret Key" if _is_ko else "Testnet Secret Key"),
+            ("LIVE", "BINANCE_API_KEY",
+             "실거래 API Key" if _is_ko else "Live API Key"),
+            ("LIVE", "BINANCE_API_SECRET",
+             "실거래 Secret Key" if _is_ko else "Live Secret Key"),
+        ]
+        for _idx, (_env_label, _var_name, _var_desc) in enumerate(_var_rows):
+            _bg = "#1c1f2b" if _idx % 2 == 0 else "#151922"
+            _env_color = "#2EBD85" if _env_label == "TESTNET" else "#F0B90B"
+            _tbl_row = tk.Frame(_var_table_frame, bg=_bg)
+            _tbl_row.pack(fill="x", padx=1)
+            tk.Label(_tbl_row, text=_env_label, bg=_bg, fg=_env_color,
+                     font=("Malgun Gothic", 9, "bold"), width=8, anchor="w"
+                     ).pack(side=tk.LEFT, padx=4, pady=3)
+            tk.Label(_tbl_row, text=_var_name, bg=_bg, fg="#58a6ff",
+                     font=("Consolas", 10), width=28, anchor="w"
+                     ).pack(side=tk.LEFT, padx=4, pady=3)
+            tk.Label(_tbl_row, text=_var_desc, bg=_bg, fg="#c0c6dc",
+                     font=("Malgun Gothic", 9), width=30, anchor="w"
+                     ).pack(side=tk.LEFT, padx=4, pady=3)
+
+        tk.Label(_var_table_frame,
+                 text=("※ 각 변수값은 복사/붙여넣기 후 '새로 만들기' 또는 '편집'으로 저장하고,\n"
+                       "   변경 시 GUI를 재실행해야 적용됩니다."
+                       if _is_ko else
+                       "※ Copy/paste each value into 'New' or 'Edit', then save.\n"
+                       "   Restart the GUI after changes to apply."),
+                 bg="#1c1f2b", fg="#888e9e",
+                 font=("Malgun Gothic", 9), anchor="w", justify="left"
+                 ).pack(fill="x", padx=16, pady=(4, 10))
+
+        # ── API 키 상태 확인 ──
+        tk.Label(body, text=self._t("api_settings_title","API 설정 상태"), bg="#181A20", fg="white",
+                 font=("Malgun Gothic", 13, "bold"), anchor="w").pack(fill="x", padx=40, pady=(20, 8))
 
         status_frame = tk.Frame(body, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
         status_frame.pack(fill="x", padx=40, pady=(0, 20))
@@ -3243,109 +3334,6 @@ class BotGUI:
 
         build_custom_checkbox(body, self._t("env_notify_popup","주문/체결 완료 시 알림 팝업"), notify_var, pady=(12, 0))
         build_custom_checkbox(body, self._t("env_auto_start","Windows 시작 시 자동 실행"), auto_start_var, pady=(6, 0))
-
-        # ── 환경변수 설정 가이드 ──
-        tk.Label(body,
-                 text="환경변수 설정 방법" if _is_ko else "How to Set Environment Variables",
-                 bg="#181A20", fg="white",
-                 font=("Malgun Gothic", 13, "bold"), anchor="w"
-                 ).pack(fill="x", padx=40, pady=(24, 4))
-        tk.Label(body,
-                 text=("이 버전부터 API 키/시크릿은 프로그램 안에서 입력하지 않습니다.\n"
-                       "Windows 환경 변수에 아래 키를 등록한 뒤 GUI를 다시 시작해 주세요."
-                       if _is_ko else
-                       "From this version, API keys are not entered inside the program.\n"
-                       "Register the keys below as Windows environment variables, then restart the GUI."),
-                 bg="#181A20", fg="#c0c6dc",
-                 font=("Malgun Gothic", 10), justify="left", wraplength=720, anchor="w"
-                 ).pack(fill="x", padx=40, pady=(0, 12))
-
-        _env_guide_frame = tk.Frame(body, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
-        _env_guide_frame.pack(fill="x", padx=40, pady=(0, 8))
-
-        # 단계별 가이드 — 각 스텝을 개별 row로
-        if _is_ko:
-            _steps = [
-                ("①", "Windows 검색창에 '환경 변수' 입력 → '시스템 환경 변수 편집' 클릭"),
-                ("②", "'환경 변수(N)...' 버튼 클릭"),
-                ("③", "'사용자 변수' 영역에서 '새로 만들기(N)...' 클릭"),
-                ("④", "아래 변수명과 값을 하나씩 추가 (총 4개)"),
-                ("⑤", "모두 입력 후 '확인' 버튼 클릭 (모든 창 닫기)"),
-                ("⑥", "이 프로그램을 완전히 종료한 후 다시 실행"),
-            ]
-        else:
-            _steps = [
-                ("①", "Search 'Environment Variables' in Windows → 'Edit system environment variables'"),
-                ("②", "Click 'Environment Variables...' button"),
-                ("③", "Under 'User variables', click 'New...'"),
-                ("④", "Add the following variables one by one (4 total)"),
-                ("⑤", "Click 'OK' on all dialogs"),
-                ("⑥", "Close and restart this program"),
-            ]
-
-        for _num, _desc in _steps:
-            _step_row = tk.Frame(_env_guide_frame, bg="#1c1f2b")
-            _step_row.pack(fill="x", padx=16, pady=3)
-            tk.Label(_step_row, text=_num, bg="#1c1f2b", fg="#F0B90B",
-                     font=("Malgun Gothic", 10, "bold"), width=3, anchor="e"
-                     ).pack(side=tk.LEFT, padx=(0, 8))
-            tk.Label(_step_row, text=_desc, bg="#1c1f2b", fg="#f5f7ff",
-                     font=("Malgun Gothic", 10), anchor="w"
-                     ).pack(side=tk.LEFT, fill="x", expand=True)
-
-        # 상하 여백
-        tk.Frame(_env_guide_frame, bg="#1c1f2b", height=6).pack()
-
-        # ── 변수명 테이블 (④단계 상세) ──
-        _var_table_frame = tk.Frame(body, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
-        _var_table_frame.pack(fill="x", padx=40, pady=(0, 8))
-
-        # 테이블 헤더
-        _tbl_hdr = tk.Frame(_var_table_frame, bg="#0D1117")
-        _tbl_hdr.pack(fill="x", padx=1, pady=(1, 0))
-        for _col_text, _col_w in [("환경" if _is_ko else "Env", 8),
-                                   ("변수명" if _is_ko else "Variable Name", 28),
-                                   ("값" if _is_ko else "Value", 30)]:
-            tk.Label(_tbl_hdr, text=_col_text, bg="#0D1117", fg="#F0B90B",
-                     font=("Malgun Gothic", 9, "bold"), width=_col_w, anchor="w"
-                     ).pack(side=tk.LEFT, padx=4, pady=4)
-
-        # 테이블 데이터
-        _var_rows = [
-            ("TESTNET", "TESTNET_API_KEY",
-             "테스트넷 API Key" if _is_ko else "Testnet API Key"),
-            ("TESTNET", "TESTNET_API_SECRET",
-             "테스트넷 Secret Key" if _is_ko else "Testnet Secret Key"),
-            ("LIVE", "BINANCE_API_KEY",
-             "실거래 API Key" if _is_ko else "Live API Key"),
-            ("LIVE", "BINANCE_API_SECRET",
-             "실거래 Secret Key" if _is_ko else "Live Secret Key"),
-        ]
-        for _idx, (_env_label, _var_name, _var_desc) in enumerate(_var_rows):
-            _bg = "#1c1f2b" if _idx % 2 == 0 else "#151922"
-            _env_color = "#2EBD85" if _env_label == "TESTNET" else "#F0B90B"
-            _tbl_row = tk.Frame(_var_table_frame, bg=_bg)
-            _tbl_row.pack(fill="x", padx=1)
-            tk.Label(_tbl_row, text=_env_label, bg=_bg, fg=_env_color,
-                     font=("Malgun Gothic", 9, "bold"), width=8, anchor="w"
-                     ).pack(side=tk.LEFT, padx=4, pady=3)
-            tk.Label(_tbl_row, text=_var_name, bg=_bg, fg="#58a6ff",
-                     font=("Consolas", 10), width=28, anchor="w"
-                     ).pack(side=tk.LEFT, padx=4, pady=3)
-            tk.Label(_tbl_row, text=_var_desc, bg=_bg, fg="#c0c6dc",
-                     font=("Malgun Gothic", 9), width=30, anchor="w"
-                     ).pack(side=tk.LEFT, padx=4, pady=3)
-
-        # 안내 문구
-        tk.Label(_var_table_frame,
-                 text=("※ 각 변수값은 복사/붙여넣기 후 '새로 만들기' 또는 '편집'으로 저장하고,\n"
-                       "   변경 시 GUI를 재실행해야 적용됩니다."
-                       if _is_ko else
-                       "※ Copy/paste each value into 'New' or 'Edit', then save.\n"
-                       "   Restart the GUI after changes to apply."),
-                 bg="#1c1f2b", fg="#888e9e",
-                 font=("Malgun Gothic", 9), anchor="w", justify="left"
-                 ).pack(fill="x", padx=16, pady=(4, 10))
 
         # 하단 여백
         tk.Frame(body, bg="#181A20", height=20).pack(fill="x")
