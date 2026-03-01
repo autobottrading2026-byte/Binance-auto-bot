@@ -674,10 +674,38 @@ class BotGUI:
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title(f"{self._t('app_title', TITLE)} v{APP_VERSION}")
+        # ── 윈도우 아이콘 설정 ──
+        _icon_path = os.path.join(BASE_DIR, "assets", "bot_converted.ico")
+        if not os.path.isfile(_icon_path):
+            _icon_path = os.path.join(BASE_DIR, "assets", "bot.ico")
+        if os.path.isfile(_icon_path):
+            try:
+                self.root.iconbitmap(_icon_path)
+            except Exception:
+                # ico가 아닌 PNG 등일 경우 iconphoto fallback
+                try:
+                    _icon_img = tk.PhotoImage(file=os.path.join(BASE_DIR, "assets", "bot.ico"))
+                    self.root.iconphoto(True, _icon_img)
+                except Exception:
+                    pass
         self.root.geometry("1280x780")
         self.root.configure(bg="#181A20")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # ── 글로벌 스크롤바 다크 테마 스타일 ──
+        _gs = ttk.Style()
+        try:
+            _gs.theme_use("clam")
+        except Exception:
+            pass
+        _gs.configure("Vertical.TScrollbar",
+                      background="#353b50", troughcolor="#12141a",
+                      arrowcolor="#4a5270", borderwidth=0, relief="flat",
+                      width=8)
+        _gs.map("Vertical.TScrollbar",
+                background=[("active", "#4a5270"), ("pressed", "#5a6488")])
+
         self.checkbox_images = self._load_checkbox_images()
 
         self.root.bind("<F1>", lambda event=None: self._open_help_modal())
@@ -686,6 +714,11 @@ class BotGUI:
         self._schedule_notification_poll()
         if not self.risk_acknowledged:
             self.root.after(800, lambda: self.open_settings_modal(initial_tab="dev"))
+            # 설정창 위에 시작하기 다이얼로그도 띄움
+            self.root.after(1200, self._show_referral_onboarding)
+        else:
+            # 동의 완료 상태 → 레퍼럴 온보딩만
+            self.root.after(500, self._show_referral_onboarding)
         self.root.after(1500, self._maybe_auto_launch_engine)
         self._shutdown_alert_suppressed = False
         self._restart_notice_pending = False
@@ -765,7 +798,7 @@ class BotGUI:
         if not REFERRAL_CODE:
             self.root.after(200, self._show_integrity_warning)
         # [PATCH-11] 첫 실행 시 레퍼럴 가입 안내
-        self.root.after(500, self._show_referral_onboarding)
+        # → __init__에서 risk_acknowledged 여부에 따라 호출 시점 결정
         # [PATCH-11] 자동 업데이트 체크
         self.root.after(3000, self._check_for_updates)
 
@@ -786,9 +819,7 @@ class BotGUI:
 
     def _show_referral_onboarding(self):
         """신규 사용자(API 키 미설정)에게 레퍼럴 링크로 가입 유도."""
-        # 이미 API 키가 있거나 온보딩을 본 적 있으면 스킵
-        if self.settings_data.get("referral_onboarding_shown", False):
-            return
+        # API 키가 하나라도 설정되어 있으면 스킵 (매 실행마다 체크)
         has_key = bool(os.environ.get("BINANCE_API_KEY") or os.environ.get("TESTNET_API_KEY"))
         if has_key:
             self.settings_data["referral_onboarding_shown"] = True
@@ -796,84 +827,310 @@ class BotGUI:
             return
         ref_code = self.settings_data.get("binance_referral_code", "")
         if not ref_code:
-            # 배포자가 레퍼럴 코드를 아직 설정하지 않은 경우 스킵
             return
+        # 설정창이 열려 있으면 grab 해제 (레퍼럴 다이얼로그가 위에 뜰 수 있게)
+        _modal = getattr(self, "_active_modal", None)
+        if _modal and _modal.winfo_exists():
+            try:
+                _modal.grab_release()
+            except Exception:
+                pass
         _is_ko = self.language == "ko"
-        dialog = tk.Toplevel(self.root)
-        dialog.title("바이낸스 가입 안내" if _is_ko else "Binance Registration")
-        dialog.configure(bg="#181A20")
-        dialog.geometry("520x380")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.grab_set()
-        # 제목
-        tk.Label(dialog,
-                 text="🚀 바이낸스 계정이 필요합니다" if _is_ko else "🚀 Binance Account Required",
-                 bg="#181A20", fg="#F0B90B",
-                 font=("Malgun Gothic", 14, "bold")).pack(pady=(24, 12))
-        # 안내 메시지
-        msg = ("이 봇을 사용하려면 바이낸스 선물 계정이 필요합니다.\n"
-               "아래 링크로 가입하시면 거래 수수료 할인을 받을 수 있습니다.\n\n"
-               "가입 후 API 키를 발급받아 환경변수에 설정해주세요." if _is_ko else
-               "You need a Binance Futures account to use this bot.\n"
-               "Sign up via the link below to get a fee discount.\n\n"
-               "After registration, create API keys and set them as environment variables.")
-        tk.Label(dialog, text=msg, bg="#181A20", fg="#c0c6dc",
-                 font=("Malgun Gothic", 10), justify="center",
-                 wraplength=460).pack(pady=(0, 16))
-        # 레퍼럴 링크 (가입 + 선물)
-        ref_url = f"https://www.binance.com/register?ref={ref_code}"
-        link_frame = tk.Frame(dialog, bg="#1c1f2b", highlightbackground="#F0B90B", highlightthickness=1)
-        link_frame.pack(padx=40, pady=(0, 12), fill="x")
-        tk.Label(link_frame, text="가입 링크:" if _is_ko else "Sign-up link:",
-                 bg="#1c1f2b", fg="#888e9e",
-                 font=("Malgun Gothic", 9), anchor="w").pack(padx=16, pady=(8, 0), anchor="w")
-        tk.Label(link_frame, text=ref_url, bg="#1c1f2b", fg="#F0B90B",
-                 font=("Courier New", 10)).pack(padx=16, pady=(2, 4), anchor="w")
-        tk.Label(link_frame, text=f"추천 코드: {ref_code}" if _is_ko else f"Referral code: {ref_code}",
-                 bg="#1c1f2b", fg="#2EBD85",
-                 font=("Malgun Gothic", 10, "bold")).pack(padx=16, pady=(0, 8), anchor="w")
+        import webbrowser as _wb
 
-        def _copy_link():
+        ref_url = f"https://www.binance.com/register?ref={ref_code}"
+        api_url = "https://www.binance.com/en/my/settings/api-management"
+        testnet_api_url = "https://testnet.binancefuture.com/en/futures/BTC_USDT"
+
+        _BG = "#181A20"
+        _GOLD = "#F0B90B"
+        _GOLD_DIM = "#c49a09"
+        _GREEN = "#2EBD85"
+        _CARD_BG = "#1e2230"
+
+        _parent = self.root
+        if _modal and _modal.winfo_exists():
+            _parent = _modal
+
+        dialog = tk.Toplevel(_parent)
+        dialog.title("바이낸스 시작하기" if _is_ko else "Get Started with Binance")
+        self._apply_icon(dialog)
+        dialog.configure(bg=_BG)
+        dialog.geometry("500x440")
+        dialog.resizable(False, False)
+        dialog.transient(_parent)
+        dialog.grab_set()
+        dialog.lift()
+        dialog.focus_force()
+
+        # ── 제목 ──
+        tk.Label(dialog,
+                 text="🚀 시작하기" if _is_ko else "🚀 Getting Started",
+                 bg=_BG, fg=_GOLD,
+                 font=("Malgun Gothic", 16, "bold")).pack(pady=(28, 2))
+        tk.Label(dialog,
+                 text="현재 상태에 맞는 항목을 선택해주세요." if _is_ko else "Select the option that matches your situation.",
+                 bg=_BG, fg="#6a7080",
+                 font=("Malgun Gothic", 9)).pack(pady=(0, 20))
+
+        # ── 레퍼럴 링크 바 (2줄 구조로 짤림 방지) ──
+        ref_bar = tk.Frame(dialog, bg=_CARD_BG)
+        ref_bar.pack(fill="x", padx=36, pady=(0, 18))
+        # 상단: 라벨 + 복사버튼
+        ref_top = tk.Frame(ref_bar, bg=_CARD_BG)
+        ref_top.pack(fill="x", padx=12, pady=(8, 0))
+        tk.Label(ref_top, text="Referral Link",
+                 bg=_CARD_BG, fg="#6a7080",
+                 font=("Malgun Gothic", 8)).pack(side=tk.LEFT)
+        def _copy_ref():
             dialog.clipboard_clear()
             dialog.clipboard_append(ref_url)
-            copy_btn.configure(text="✅ 복사됨!" if _is_ko else "✅ Copied!")
-            dialog.after(2000, lambda: copy_btn.configure(text="링크 복사" if _is_ko else "Copy Link"))
+            copy_lbl.configure(text=" Copied! ", fg=_GREEN)
+            dialog.after(1500, lambda: copy_lbl.configure(text=" Copy ", fg="#6a7080"))
+        copy_lbl = tk.Label(ref_top, text=" Copy ", bg="#282d3a", fg="#6a7080",
+                            font=("Malgun Gothic", 8), cursor="hand2", padx=6)
+        copy_lbl.pack(side=tk.RIGHT)
+        copy_lbl.bind("<Button-1>", lambda e: _copy_ref())
+        # 하단: URL (전체 너비 사용)
+        ref_bottom = tk.Frame(ref_bar, bg=_CARD_BG)
+        ref_bottom.pack(fill="x", padx=12, pady=(2, 8))
+        tk.Label(ref_bottom, text=ref_url,
+                 bg=_CARD_BG, fg=_GOLD,
+                 font=("Consolas", 9), anchor="w").pack(side=tk.LEFT, fill="x")
 
-        def _open_link():
-            import webbrowser
-            webbrowser.open(ref_url)
+        # ── 3가지 선택 버튼 (바이낸스 골드 톤 통일) ──
+        choices_frame = tk.Frame(dialog, bg=_BG)
+        choices_frame.pack(fill="x", padx=36, pady=(0, 8))
 
-        btn_frame = tk.Frame(dialog, bg="#181A20")
-        btn_frame.pack(pady=(0, 12))
-        copy_btn = tk.Button(btn_frame,
-                             text="링크 복사" if _is_ko else "Copy Link",
-                             command=_copy_link,
-                             bg="#F0B90B", fg="#181A20",
-                             activebackground="#d9a80a", relief="flat",
-                             font=("Malgun Gothic", 11, "bold"), cursor="hand2",
-                             padx=20, pady=6)
-        copy_btn.pack(side=tk.LEFT, padx=(0, 8))
-        tk.Button(btn_frame,
-                  text="브라우저에서 열기" if _is_ko else "Open in Browser",
-                  command=_open_link,
-                  bg="#2EBD85", fg="white",
-                  activebackground="#24a070", relief="flat",
-                  font=("Malgun Gothic", 11, "bold"), cursor="hand2",
-                  padx=20, pady=6).pack(side=tk.LEFT)
+        _btn_common = {
+            "relief": tk.FLAT, "cursor": "hand2",
+            "font": ("Malgun Gothic", 10, "bold"),
+            "padx": 16, "pady": 10, "anchor": "w", "bd": 0,
+        }
+
+        # 1) 바이낸스 계정이 없어요 → 가입
+        def _open_register():
+            _wb.open(ref_url)
+
+        tk.Button(choices_frame,
+                  text=("🔗  계정이 없어요  ─  가입하기" if _is_ko
+                        else "🔗  No account  ─  Sign up"),
+                  command=_open_register,
+                  bg="#2b2311", fg=_GOLD,
+                  activebackground="#3a3018", activeforeground="#ffe082",
+                  **_btn_common).pack(fill="x", pady=(0, 5))
+
+        # 2) API 키가 없어요 → 발급 안내
+        def _show_api_guide():
+            self._show_api_key_guide(dialog, _is_ko, api_url, testnet_api_url)
+
+        tk.Button(choices_frame,
+                  text=("🔑  API 키가 없어요  ─  발급 안내" if _is_ko
+                        else "🔑  No API key  ─  How to create"),
+                  command=_show_api_guide,
+                  bg="#1f2816", fg=_GREEN,
+                  activebackground="#2a381e", activeforeground="#80e8b0",
+                  **_btn_common).pack(fill="x", pady=(0, 5))
+
+        # 3) API 키 발급 완료 → 환경설정
+        def _go_to_env_settings():
+            dialog.destroy()
+            if _modal and _modal.winfo_exists():
+                try:
+                    _modal.grab_set()
+                    _modal.lift()
+                    _modal.focus_force()
+                except Exception:
+                    pass
+                if hasattr(self, "_settings_show_section"):
+                    self.root.after(100, lambda: self._settings_show_section("env"))
+            else:
+                self.root.after(150, lambda: self.open_settings_modal(initial_tab="env"))
+
+        tk.Button(choices_frame,
+                  text=("⚙  API 키 발급 완료  ─  환경변수 설정" if _is_ko
+                        else "⚙  Have API keys  ─  Set up now"),
+                  command=_go_to_env_settings,
+                  bg=_CARD_BG, fg="#c0c6dc",
+                  activebackground="#282d3a", activeforeground="#ffffff",
+                  **_btn_common).pack(fill="x", pady=(0, 0))
+
+        # ── 하단 닫기 ──
+        def _restore_parent_grab():
+            """레퍼럴 다이얼로그 닫힌 후 설정창 grab/focus 복원."""
+            if _modal and _modal.winfo_exists():
+                try:
+                    _modal.grab_set()
+                    _modal.lift()
+                    _modal.focus_force()
+                except Exception:
+                    pass
 
         def _close():
-            self.settings_data["referral_onboarding_shown"] = True
-            self._save_json(CONFIG_PATH, self.settings_data)
             dialog.destroy()
+            _restore_parent_grab()
 
+        tk.Label(dialog, text="", bg=_BG).pack(expand=True)  # spacer
         tk.Button(dialog,
-                  text="닫기" if _is_ko else "Close",
+                  text="나중에 할게요" if _is_ko else "Later",
                   command=_close,
-                  bg="#343942", fg="#c0c6dc",
-                  activebackground="#444b57", relief="flat",
-                  font=("Malgun Gothic", 10), cursor="hand2",
-                  padx=16, pady=4).pack(pady=(8, 20))
+                  bg=_BG, fg="#4a4f5e",
+                  activebackground=_BG, activeforeground="#6a7080", relief="flat",
+                  font=("Malgun Gothic", 9), cursor="hand2",
+                  padx=10, pady=3).pack(pady=(0, 18))
+
+    def _show_api_key_guide(self, parent_dialog, _is_ko, api_url, testnet_api_url):
+        """API 키 발급 방법을 상세 안내하는 다이얼로그."""
+        import webbrowser as _wb
+
+        _BG = "#181A20"
+        _GOLD = "#F0B90B"
+        _GREEN = "#2EBD85"
+        _CARD = "#1e2230"
+        _TEXT = "#c0c6dc"
+        _DIM = "#6a7080"
+
+        guide = tk.Toplevel(parent_dialog)
+        guide.title("API 키 발급 안내" if _is_ko else "API Key Guide")
+        self._apply_icon(guide)
+        guide.configure(bg=_BG)
+        guide.geometry("520x540")
+        guide.resizable(False, False)
+        guide.transient(parent_dialog)
+        guide.grab_set()
+
+        # 스크롤 가능한 영역
+        canvas = tk.Canvas(guide, bg=_BG, highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(guide, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        body = tk.Frame(canvas, bg=_BG)
+        canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_frame_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_frame_configure)
+
+        def _guide_mousewheel(event):
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+        canvas.bind_all("<MouseWheel>", _guide_mousewheel, add="+")
+        def _guide_cleanup(*_):
+            try: canvas.unbind_all("<MouseWheel>")
+            except Exception: pass
+        canvas.bind("<Destroy>", _guide_cleanup, add="+")
+
+        px = 28
+
+        # ── 제목 ──
+        tk.Label(body, text="API 키 발급 방법" if _is_ko else "How to Create API Keys",
+                 bg=_BG, fg="#ffffff",
+                 font=("Malgun Gothic", 14, "bold")).pack(anchor="w", padx=px, pady=(22, 16))
+
+        # ── 실거래 섹션 ──
+        live_card = tk.Frame(body, bg=_CARD)
+        live_card.pack(fill="x", padx=px, pady=(0, 12))
+
+        tk.Label(live_card, text="실거래 (Live)" if _is_ko else "Live",
+                 bg=_CARD, fg=_GOLD,
+                 font=("Malgun Gothic", 11, "bold")).pack(anchor="w", padx=14, pady=(12, 6))
+
+        live_steps = [
+            ("1.", "바이낸스 로그인" if _is_ko else "Log in to Binance"),
+            ("2.", "프로필 → API 관리 클릭" if _is_ko else "Profile → API Management"),
+            ("3.", "API 생성 → 라벨 입력 (예: AutoBot)" if _is_ko else "Create API → Enter label (e.g. AutoBot)"),
+            ("4.", "보안 인증 완료 (이메일/2FA)" if _is_ko else "Complete security verification"),
+            ("5.", "수정 → Enable Futures 체크" if _is_ko else "Edit → Enable Futures"),
+            ("6.", "IP 제한 설정 권장" if _is_ko else "Set IP restriction (recommended)"),
+            ("7.", "API Key, Secret Key 복사 후 보관" if _is_ko else "Copy & save API Key and Secret Key"),
+        ]
+        for num, text in live_steps:
+            row = tk.Frame(live_card, bg=_CARD)
+            row.pack(fill="x", padx=14, pady=1)
+            tk.Label(row, text=num, bg=_CARD, fg=_GOLD, width=3, anchor="e",
+                     font=("Consolas", 10, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+            tk.Label(row, text=text, bg=_CARD, fg=_TEXT,
+                     font=("Malgun Gothic", 9), anchor="w").pack(side=tk.LEFT)
+
+        # 실거래 링크
+        live_btn = tk.Frame(live_card, bg="#2b2311")
+        live_btn.pack(fill="x", padx=14, pady=(8, 12))
+        def _open_live(): _wb.open(api_url)
+        tk.Label(live_btn, text="API Management 페이지 열기  →" if _is_ko else "Open API Management  →",
+                 bg="#2b2311", fg=_GOLD, cursor="hand2",
+                 font=("Malgun Gothic", 9, "bold")).pack(padx=10, pady=6)
+        live_btn.bind("<Button-1>", lambda e: _open_live())
+        for child in live_btn.winfo_children():
+            child.bind("<Button-1>", lambda e: _open_live())
+
+        # ── 테스트넷 섹션 ──
+        test_card = tk.Frame(body, bg=_CARD)
+        test_card.pack(fill="x", padx=px, pady=(0, 12))
+
+        tk.Label(test_card, text="테스트넷 (Testnet)" if _is_ko else "Testnet",
+                 bg=_CARD, fg=_GREEN,
+                 font=("Malgun Gothic", 11, "bold")).pack(anchor="w", padx=14, pady=(12, 6))
+
+        testnet_steps = [
+            ("1.", "테스트넷 사이트 접속 → 로그인" if _is_ko else "Go to Testnet → Log in"),
+            ("2.", "API Key 메뉴 클릭" if _is_ko else "Click API Key menu"),
+            ("3.", "Create API 클릭 → 즉시 발급" if _is_ko else "Create API → Instant generation"),
+            ("4.", "API Key, Secret Key 복사" if _is_ko else "Copy API Key & Secret Key"),
+        ]
+        for num, text in testnet_steps:
+            row = tk.Frame(test_card, bg=_CARD)
+            row.pack(fill="x", padx=14, pady=1)
+            tk.Label(row, text=num, bg=_CARD, fg=_GREEN, width=3, anchor="e",
+                     font=("Consolas", 10, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+            tk.Label(row, text=text, bg=_CARD, fg=_TEXT,
+                     font=("Malgun Gothic", 9), anchor="w").pack(side=tk.LEFT)
+
+        # 테스트넷 링크
+        test_btn = tk.Frame(test_card, bg="#1f2816")
+        test_btn.pack(fill="x", padx=14, pady=(8, 12))
+        def _open_testnet(): _wb.open(testnet_api_url)
+        tk.Label(test_btn, text="Testnet Futures 페이지 열기  →" if _is_ko else "Open Testnet Futures  →",
+                 bg="#1f2816", fg=_GREEN, cursor="hand2",
+                 font=("Malgun Gothic", 9, "bold")).pack(padx=10, pady=6)
+        test_btn.bind("<Button-1>", lambda e: _open_testnet())
+        for child in test_btn.winfo_children():
+            child.bind("<Button-1>", lambda e: _open_testnet())
+
+        # ── 주의사항 ──
+        warn_card = tk.Frame(body, bg="#2a2215")
+        warn_card.pack(fill="x", padx=px, pady=(0, 16))
+        tk.Label(warn_card, text="주의사항" if _is_ko else "Important",
+                 bg="#2a2215", fg=_GOLD,
+                 font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=14, pady=(10, 4))
+        warn_items = [
+            ("Secret Key는 생성 시 한 번만 표시됩니다." if _is_ko else "Secret Key is shown only once."),
+            ("출금(Withdraw) 권한은 절대 활성화하지 마세요." if _is_ko else "Never enable Withdraw permission."),
+            ("먼저 테스트넷에서 충분히 테스트 후 실거래하세요." if _is_ko else "Test on Testnet first before Live trading."),
+        ]
+        for item in warn_items:
+            row = tk.Frame(warn_card, bg="#2a2215")
+            row.pack(fill="x", padx=14, pady=1)
+            tk.Label(row, text="•", bg="#2a2215", fg="#c49a09",
+                     font=("Consolas", 10)).pack(side=tk.LEFT, padx=(0, 6))
+            tk.Label(row, text=item, bg="#2a2215", fg="#c8b870",
+                     font=("Malgun Gothic", 9), anchor="w").pack(side=tk.LEFT)
+        tk.Label(warn_card, text="", bg="#2a2215").pack(pady=(0, 6))  # bottom padding
+
+        # ── 하단 닫기 ──
+        bottom = tk.Frame(body, bg=_BG)
+        bottom.pack(fill="x", padx=px, pady=(0, 22))
+        tk.Button(bottom,
+                  text="확인" if _is_ko else "OK",
+                  command=guide.destroy,
+                  bg=_CARD, fg="#c0c6dc",
+                  activebackground="#282d3a", activeforeground="#ffffff",
+                  relief=tk.FLAT, cursor="hand2",
+                  font=("Malgun Gothic", 10, "bold"),
+                  padx=24, pady=6).pack(anchor="center")
 
     def _check_for_updates(self):
         """GitHub Releases에서 최신 버전 확인 (백그라운드)."""
@@ -929,28 +1186,40 @@ class BotGUI:
             pass
 
     def _build_sidebar(self):
-        pad = {"padx": 16, "pady": 10}
+        _SB_BG = "#0c1017"
+
+        # ── 타이틀 영역 (골드 하단 라인) ──
+        title_area = tk.Frame(self.sidebar, bg=_SB_BG)
+        title_area.pack(fill="x")
+
         tk.Label(
-            self.sidebar,
+            title_area,
             text=self._t('app_title', TITLE),
-            bg="#0c1017",
-            fg="white",
+            bg=_SB_BG,
+            fg="#F0B90B",
             font=("Segoe UI", 12, "bold"),
             wraplength=180,
             justify="left",
-        ).pack(anchor="w", **pad)
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+        tk.Label(
+            title_area,
+            text=f"v{APP_VERSION}",
+            bg=_SB_BG, fg="#4a5068",
+            font=("Consolas", 8),
+        ).pack(anchor="w", padx=16, pady=(0, 10))
+        tk.Frame(title_area, bg="#F0B90B", height=1).pack(fill="x", padx=16)
 
-        env_frame = tk.Frame(self.sidebar, bg="#0c1017")
-        env_frame.pack(fill="x", padx=16, pady=(6, 18))
+        env_frame = tk.Frame(self.sidebar, bg=_SB_BG)
+        env_frame.pack(fill="x", padx=16, pady=(14, 18))
         tk.Label(
             env_frame,
             text=self._t("sidebar_env", "환경"),
-            bg="#0c1017",
+            bg=_SB_BG,
             fg="#9aa5c6",
             font=("Malgun Gothic", 10, "bold"),
             anchor="w",
         ).pack(fill="x", pady=(0, 6))
-        self.env_canvas = tk.Canvas(env_frame, width=140, height=36, bg="#0c1017", highlightthickness=0)
+        self.env_canvas = tk.Canvas(env_frame, width=180, height=36, bg="#0c1017", highlightthickness=0)
         self.env_canvas.pack()
         self.env_canvas.bind("<Button-1>", lambda _e: self._toggle_env_mode())
         self._render_env_toggle()
@@ -994,69 +1263,71 @@ class BotGUI:
         )
         self.stop_btn.pack(fill="x")
 
+        # ── 구분선 + 빠른 링크 ──
         tk.Frame(self.sidebar, bg="#1e2438", height=1).pack(fill="x", padx=16, pady=(14, 0))
         tk.Label(
             self.sidebar,
             text=self._t("quick_links","빠른 링크"),
-            bg="#0c1017",
-            fg="#9aa5c6",
-            font=("Malgun Gothic", 10, "bold"),
+            bg=_SB_BG, fg="#6a7490",
+            font=("Malgun Gothic", 9, "bold"),
             anchor="w",
         ).pack(fill="x", padx=16, pady=(10, 6))
-        btn_kwargs = {"font": ("Segoe UI", 10, "bold"), "relief": tk.FLAT, "height": 1,
-                      "cursor": "hand2", "activebackground": "#3a4060"}
+        _link_kwargs = {"font": ("Segoe UI", 9), "relief": tk.FLAT, "height": 1,
+                        "cursor": "hand2", "bd": 0}
         tk.Button(
             self.sidebar,
             text="↗  " + self._t("link_binance","바이낸스"),
             command=lambda: webbrowser.open("https://www.binance.com/kr/futures"),
-            bg="#2d3243",
-            fg="#F0B90B",
-            activeforeground="#F0B90B",
-            **btn_kwargs,
+            bg="#141820", fg="#F0B90B",
+            activebackground="#1a2030", activeforeground="#F0B90B",
+            **_link_kwargs,
         ).pack(fill="x", padx=16, pady=2)
         tk.Button(
             self.sidebar,
             text="↗  " + self._t("link_testnet","테스트넷"),
             command=lambda: webbrowser.open("https://testnet.binancefuture.com"),
-            bg="#2d3243",
-            fg="#c0c6dc",
-            activeforeground="white",
-            **btn_kwargs,
+            bg="#141820", fg="#8890a8",
+            activebackground="#1a2030", activeforeground="#c0c6dc",
+            **_link_kwargs,
         ).pack(fill="x", padx=16, pady=2)
 
+        # ── 하단 구분선 ──
+        tk.Frame(self.sidebar, bg="#1e2438", height=1).pack(
+            side=tk.BOTTOM, fill="x", padx=16, pady=(0, 0))
 
+        # ── 도움말 버튼 ──
         help_btn = tk.Button(
             self.sidebar,
             text="?  " + self._t("help_btn","도움말"),
             command=self._open_help_modal,
-            bg="#2b2f3e",
-            fg="#c0c6dc",
-            font=("Malgun Gothic", 10, "bold"),
+            bg=_SB_BG, fg="#606878",
+            font=("Malgun Gothic", 9),
             relief=tk.FLAT,
             cursor="hand2",
-            activebackground="#3a4060",
-            activeforeground="#ffffff",
+            activebackground="#141820",
+            activeforeground="#c0c6dc",
         )
-        help_btn.pack(side=tk.BOTTOM, fill="x", padx=16, pady=(0, 12))
+        help_btn.pack(side=tk.BOTTOM, fill="x", padx=16, pady=(6, 10))
 
+        # ── 설정 버튼 ──
         settings_btn = tk.Button(
             self.sidebar,
-            text=self._t("settings_btn","설정"),
+            text="⚙  " + self._t("settings_btn","설정"),
             command=self.open_settings_modal,
-            bg="#1e2435",
-            fg="#c0c6dc",
+            bg="#141820", fg="#c0c6dc",
             font=("Malgun Gothic", 10, "bold"),
             relief=tk.FLAT,
             cursor="hand2",
-            activebackground="#252c3f",
-            activeforeground="#ffffff",
+            activebackground="#1a2030",
+            activeforeground="#F0B90B",
         )
-        settings_btn.pack(side=tk.BOTTOM, fill="x", padx=16, pady=(10, 2))
+        settings_btn.pack(side=tk.BOTTOM, fill="x", padx=16, pady=(6, 2))
 
 
     def _open_help_modal(self):
         dialog = tk.Toplevel(self.root)
         dialog.title(self._t("help_btn","도움말"))
+        self._apply_icon(dialog)
         width, height = (960, 640) if self.language == "en" else (860, 580)
         dialog.geometry(f"{width}x{height}")
         dialog.configure(bg="#0f131c")
@@ -1221,6 +1492,7 @@ class BotGUI:
         analysis_text = self._analyze_metrics_report(report_text) if success else ("Failed to generate report." if self.language == "en" else "리포트 생성 실패로 요약을 제공할 수 없습니다.")
         dialog = tk.Toplevel(self.root)
         dialog.title("12h Report" if self.language == "en" else "12시간 리포트")
+        self._apply_icon(dialog)
         width, height = 780, 560
         dialog.geometry(f"{width}x{height}")
         dialog.configure(bg="#111521")
@@ -1304,28 +1576,32 @@ class BotGUI:
                 "overview",
                 _t("개요", "Overview"),
                 _t(
-                    "이 UI는 Binance 선물 자동매매 엔진(v1.1)을 운영·모니터링하는 콘솔입니다.\n\n"
+                    "이 UI는 Binance USDT-M 선물 자동매매 엔진(v1.1.1)을 운영·모니터링하는 콘솔입니다.\n\n"
                     "• START/STOP으로 엔진 프로세스를 제어합니다.\n"
                     "• 프리셋(공격/기본/보수) 버튼으로 자동매매 전략을 전환합니다.\n"
                     "• Auto-tune이 켜져 있으면 시장 상황에 따라 파라미터가 자동 조정됩니다.\n"
                     "• 거래 로직 패널에서 현재 엔진에 적용 중인 유효 파라미터를 확인할 수 있습니다.\n\n"
-                    "탭 구성:\n"
-                    "  환경설정  — API 키, 환경(테스트넷/실거래), 알림 설정\n"
+                    "설정 탭 구성:\n"
+                    "  환경설정  — API 환경(테스트넷/실거래), 언어 설정, 환경변수 가이드\n"
                     "  화면설정  — 수동 매매 패널, 세션 상태 초기화\n"
                     "  거래설정  — 포지션 크기, 레버리지, 오토튜닝, 전략 체크박스\n"
                     "  리포트    — 거래 기록 조회, 통계, 메이커/테이커 수수료 현황\n"
-                    "  필수 동의  — 고급 필터, 손절 파라미터, 진입 로직",
-                    "This UI is an operations console for the Binance Futures auto-trading engine (v1.1).\n\n"
+                    "  필수 동의  — 리스크 경고 동의 (2항목 모두 체크 필요)\n"
+                    "  프리미엄  — Neural Scorer 라이선스 키 입력, 구독 결제\n"
+                    "  정보      — 프로그램 정보, 버전, 문의 이메일",
+                    "This UI is an operations console for the Binance USDT-M Futures auto-trading engine (v1.1.1).\n\n"
                     "• START/STOP controls the engine process.\n"
                     "• Use preset buttons (Aggressive / Balanced / Conservative) to switch strategy.\n"
                     "• When Auto-tune is ON, parameters adjust automatically based on market conditions.\n"
                     "• The Trading Logic panel shows the effective parameters currently applied by the engine.\n\n"
-                    "Tabs:\n"
-                    "  Env       — API keys, environment (testnet / live), alerts\n"
-                    "  Display   — Manual trading panel, session reset\n"
-                    "  Trade     — Position size, leverage, auto-tuning, strategy checkboxes\n"
-                    "  Report    — Trade history, stats, maker/taker fee breakdown\n"
-                    "  Developer — Advanced filters, stop-loss params, entry logic"
+                    "Settings tabs:\n"
+                    "  Env         — API environment (testnet / live), language, env variable guide\n"
+                    "  Display     — Manual trading panel, session reset\n"
+                    "  Trade       — Position size, leverage, auto-tuning, strategy checkboxes\n"
+                    "  Report      — Trade history, stats, maker/taker fee breakdown\n"
+                    "  Agreement   — Risk acknowledgment (both checkboxes required)\n"
+                    "  Premium     — Neural Scorer license key, subscription\n"
+                    "  About       — Program info, version, contact email"
                 ),
             ),
             (
@@ -1475,9 +1751,23 @@ class BotGUI:
                 _t("단축키", "Shortcuts"),
                 _t(
                     "• F1: 도움말 열기\n"
-                    "• ESC: 대부분 모달 닫기",
+                    "• ESC: 대부분 모달 닫기\n\n"
+                    "첫 실행 안내:\n"
+                    "• 프로그램을 처음 실행하면 '시작하기' 안내가 표시됩니다.\n"
+                    "• API 키가 설정되지 않은 상태에서는 매 실행 시 안내가 반복됩니다.\n"
+                    "• API 키를 환경변수에 등록하면 안내가 더 이상 표시되지 않습니다.\n\n"
+                    "문의:\n"
+                    "• 설정 → 정보 탭에서 개발자 이메일을 확인할 수 있습니다.\n"
+                    "• autobot.trading2026@gmail.com",
                     "• F1: Open help\n"
-                    "• ESC: Close most dialogs"
+                    "• ESC: Close most dialogs\n\n"
+                    "First-time guide:\n"
+                    "• A 'Getting Started' dialog appears on first launch.\n"
+                    "• It will repeat each launch until API keys are configured.\n"
+                    "• Once API keys are set in environment variables, it will stop appearing.\n\n"
+                    "Contact:\n"
+                    "• Check the developer email in Settings → About tab.\n"
+                    "• autobot.trading2026@gmail.com"
                 ),
             ),
         ]
@@ -1486,25 +1776,34 @@ class BotGUI:
     def _render_env_toggle(self):
         canvas = self.env_canvas
         canvas.delete("all")
-        width = 150
-        height = 38
-        padding = 6
-        left_box = (padding, padding, width / 2 - 2, height - padding)
-        right_box = (width / 2 + 2, padding, width - padding, height - padding)
-        canvas.create_rectangle(padding, padding, width - padding, height - padding, fill="#1c2130", outline="")
+        width = 180
+        height = 36
+        pad = 4
+        gap = 2
+        mid = width / 2
+        # 박스 좌표
+        lx1, ly1, lx2, ly2 = pad, pad, mid - gap, height - pad
+        rx1, ry1, rx2, ry2 = mid + gap, pad, width - pad, height - pad
+        # 각 박스 정중앙
+        left_cx  = (lx1 + lx2) / 2
+        left_cy  = (ly1 + ly2) / 2
+        right_cx = (rx1 + rx2) / 2
+        right_cy = (ry1 + ry2) / 2
+
+        canvas.create_rectangle(pad, pad, width - pad, height - pad, fill="#1c2130", outline="")
         if self.env_mode == "TESTNET":
-            canvas.create_rectangle(*left_box, fill="#2EBD85", outline="")
-            canvas.create_rectangle(*right_box, fill="#2d3243", outline="")
+            canvas.create_rectangle(lx1, ly1, lx2, ly2, fill="#2EBD85", outline="")
+            canvas.create_rectangle(rx1, ry1, rx2, ry2, fill="#2d3243", outline="")
             test_color = "white"
             live_color = "#7a8299"
         else:
-            canvas.create_rectangle(*left_box, fill="#2d3243", outline="")
-            canvas.create_rectangle(*right_box, fill="#F0B90B", outline="")
+            canvas.create_rectangle(lx1, ly1, lx2, ly2, fill="#2d3243", outline="")
+            canvas.create_rectangle(rx1, ry1, rx2, ry2, fill="#F0B90B", outline="")
             test_color = "#98a2bf"
-            live_color = "white"
-        canvas.create_text(width / 4, height / 2, text="TESTNET", fill=test_color, font=("Segoe UI", 10, "bold"))
-        canvas.create_text(width * 3 / 4, height / 2, text="LIVE", fill=live_color, font=("Segoe UI", 10, "bold"))
-        canvas.create_rectangle(padding, padding, width - padding, height - padding, outline="#2a3145", width=1)
+            live_color = "#ffffff"
+        canvas.create_text(left_cx, left_cy, text="TESTNET", fill=test_color, font=("Segoe UI", 9, "bold"))
+        canvas.create_text(right_cx, right_cy, text="LIVE", fill=live_color, font=("Segoe UI", 9, "bold"))
+        canvas.create_rectangle(pad, pad, width - pad, height - pad, outline="#2a3145", width=1)
 
     def _toggle_env_mode(self):
         target = "LIVE" if self.env_mode == "TESTNET" else "TESTNET"
@@ -1903,6 +2202,7 @@ class BotGUI:
 
         try:
             dialog = tk.Toplevel(target_parent)
+            self._apply_icon(dialog)
             dialog.configure(bg="#0C1017", highlightthickness=1, highlightbackground="#394058")
             dialog.resizable(False, False)
             dialog.transient(target_parent)
@@ -1986,16 +2286,15 @@ class BotGUI:
             if dialog_type == "yesno":
                 yes_text = self._t("dlg_yes", "Yes")
                 no_text  = self._t("dlg_no",  "No")
-                # YES/NO: 왼쪽 하단 정렬, 균일한 고정 폭
                 tk.Button(btn_row, text=yes_text,
-                          bg="#1f5c3a", fg="#ffffff",
-                          activebackground="#2EBD85", activeforeground="#ffffff",
+                          bg="#2a3a4a", fg="#7ecbf5",
+                          activebackground="#34506a", activeforeground="#ffffff",
                           command=lambda: _close(True),
                           width=10,
                           **_btn_base).pack(side=tk.LEFT, padx=(0, 8))
                 tk.Button(btn_row, text=no_text,
-                          bg="#2a2f3d", fg="#c8cfe8",
-                          activebackground="#363d52", activeforeground="#ffffff",
+                          bg="#1e2230", fg="#8892a8",
+                          activebackground="#2a3040", activeforeground="#c8cfe8",
                           command=lambda: _close(False),
                           width=10,
                           **_btn_base).pack(side=tk.LEFT)
@@ -2004,11 +2303,11 @@ class BotGUI:
                 dialog.protocol("WM_DELETE_WINDOW", lambda: _close(False))
             else:
                 ok_text = self._t("dlg_ok", "OK")
-                btn_bg     = "#1f5c3a" if dialog_type == "info" else ("#5a3a00" if dialog_type == "warning" else "#5a1a1a")
-                _active_bg = "#2EBD85" if dialog_type == "info" else ("#F7C948" if dialog_type == "warning" else "#F6465D")
-                # 확인/닫기 버튼: 가로 중앙 정렬, 충분한 너비
+                btn_bg     = "#1e2d3d" if dialog_type == "info" else ("#2e2a1e" if dialog_type == "warning" else "#2e1e1e")
+                btn_fg     = "#7ecbf5" if dialog_type == "info" else ("#e8c96a" if dialog_type == "warning" else "#f08080")
+                _active_bg = "#2a4060" if dialog_type == "info" else ("#3d3828" if dialog_type == "warning" else "#3d2828")
                 tk.Button(btn_row, text=ok_text,
-                          bg=btn_bg, fg="#ffffff",
+                          bg=btn_bg, fg=btn_fg,
                           activebackground=_active_bg, activeforeground="#ffffff",
                           command=lambda: _close(),
                           width=16,
@@ -2027,15 +2326,19 @@ class BotGUI:
                 self.root.grab_release()
             except Exception:
                 pass
-            # 알림창 닫힌 후 원래 modal이 살아 있으면 focus만 복원
-            # (grab_set 제거 — 다른 Toplevel 창과 동시 조작 보장)
+            # 알림창 닫힌 후 원래 modal을 최상위로 복원
             try:
                 _restore_modal = modal if (modal and modal.winfo_exists()) else None
                 if _restore_modal is None:
                     _restore_modal = getattr(self, "_active_modal", None)
                 if _restore_modal and _restore_modal.winfo_exists():
+                    _restore_modal.attributes("-topmost", True)
                     _restore_modal.lift()
                     _restore_modal.focus_force()
+                    # topmost 해제 (일시적으로만 사용)
+                    _restore_modal.after(100, lambda m=_restore_modal: (
+                        m.attributes("-topmost", False) if m.winfo_exists() else None
+                    ))
             except Exception:
                 pass
 
@@ -2182,6 +2485,7 @@ class BotGUI:
     def open_settings_modal(self, initial_tab="env"):
         dialog = tk.Toplevel(self.root)
         dialog.title(self._t("settings_title","설정"))
+        self._apply_icon(dialog)
         width, height = 1100, 780
         dialog.geometry(f"{width}x{height}")
         dialog.configure(bg="#181A20")
@@ -2214,9 +2518,19 @@ class BotGUI:
         container = tk.Frame(dialog, bg="#181A20")
         container.pack(fill=tk.BOTH, expand=True)
 
-        sidebar = tk.Frame(container, width=180, bg="#0c1017")
+        _SET_SB_BG = "#0c1017"
+        _SET_SB_SEL = "#181e2c"
+
+        sidebar = tk.Frame(container, width=180, bg=_SET_SB_BG)
         sidebar.pack(side=tk.LEFT, fill=tk.Y)
         sidebar.pack_propagate(False)
+
+        # 설정 사이드바 타이틀
+        tk.Label(sidebar, text=self._t("settings_title", "설정"),
+                 bg=_SET_SB_BG, fg="#F0B90B",
+                 font=("Malgun Gothic", 12, "bold")).pack(
+            anchor="w", padx=16, pady=(18, 4))
+        tk.Frame(sidebar, bg="#F0B90B", height=1).pack(fill="x", padx=16, pady=(0, 8))
 
         content = tk.Frame(container, bg="#181A20")
         content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -2234,7 +2548,17 @@ class BotGUI:
                 sec.pack_forget()
             sections[key].pack(fill=tk.BOTH, expand=True)
             for name, btn in buttons.items():
-                btn.configure(bg="#191f2b" if name == key else "#0c1017")
+                if name == key:
+                    btn.configure(bg=_SET_SB_SEL, fg="#F0B90B")
+                elif name == "premium":
+                    btn.configure(bg=_SET_SB_BG, fg="#F0B90B")
+                else:
+                    btn.configure(bg=_SET_SB_BG, fg="#8890a8")
+            # 탭 전환 시 새 탭에 Visibility 이벤트 발행 → 스크롤 바인딩
+            try:
+                sections[key].event_generate("<Visibility>")
+            except Exception:
+                pass
         self._settings_show_section = show_section
         tabs = [
             ("env",     self._t("settings_tab_env",    "환경설정")),
@@ -2243,18 +2567,21 @@ class BotGUI:
             ("report",  self._t("settings_tab_report", "리포트")),
             ("dev",     self._t("settings_tab_dev",    "필수 동의")),
             ("premium", self._t("premium_tab_label",   "🧠 프리미엄")),
+            ("about",   self._t("settings_tab_about",  "정보")),
         ]
         for idx, (key, label) in enumerate(tabs):
             is_premium = (key == "premium")
             btn = tk.Button(
-                sidebar, text=label,
+                sidebar, text=f"  {label}",
                 command=lambda k=key: show_section(k),
-                bg="#0c1017",
-                fg="#F0B90B" if is_premium else "white",
-                relief=tk.FLAT, pady=10,
+                bg=_SET_SB_BG,
+                fg="#F0B90B" if is_premium else "#8890a8",
+                activebackground=_SET_SB_SEL,
+                activeforeground="#F0B90B",
+                relief=tk.FLAT, pady=8, anchor="w",
                 font=("Malgun Gothic", 9, "bold") if is_premium else ("Malgun Gothic", 9),
             )
-            btn.pack(fill="x", padx=10, pady=(20 if idx == 0 else 6, 0))
+            btn.pack(fill="x", padx=8, pady=(12 if idx == 0 else 3, 0))
             buttons[key] = btn
 
         env_section     = create_section("env")
@@ -2263,6 +2590,7 @@ class BotGUI:
         dev_section     = create_section("dev")
         report_section  = create_section("report")
         premium_section = create_section("premium")
+        about_section   = create_section("about")
         self._build_env_tab(env_section)
         self._build_display_tab(display_section)
         self._build_trade_tab(trade_section)
@@ -2282,7 +2610,194 @@ class BotGUI:
                 ).pack(fill="x", padx=10, pady=10)
             except Exception:
                 pass
+        self._build_about_tab(about_section)
         show_section(initial_tab if initial_tab in sections else "env")
+
+    # ─────────────────────────────────────────────────────────────
+    # 정보(About) 탭
+    # ─────────────────────────────────────────────────────────────
+    def _build_about_tab(self, frame):
+        _is_ko = (self.language == "ko")
+        _BG   = "#181A20"
+        _LINE = "#2a2f42"
+        _GOLD = "#F0B90B"
+        _GREEN = "#2EBD85"
+        _FG   = "#c8cee0"
+        _DIM  = "#606878"
+
+        frame.columnconfigure(0, weight=1)
+
+        # 스크롤 가능한 구조
+        canvas = tk.Canvas(frame, bg=_BG, highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        body = tk.Frame(canvas, bg=_BG)
+        canvas.create_window((0, 0), window=body, anchor="nw")
+        def _on_cfg(e): canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_cfg)
+        def _mw(event):
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception: pass
+        def _about_bind(e=None):
+            canvas.bind_all("<MouseWheel>", _mw)
+        def _about_unbind(e=None):
+            try: canvas.unbind_all("<MouseWheel>")
+            except Exception: pass
+        frame.bind("<Visibility>", _about_bind, add="+")
+        canvas.bind("<Enter>", _about_bind, add="+")
+        canvas.bind("<Leave>", _about_unbind, add="+")
+        body.bind("<Enter>", _about_bind, add="+")
+        body.bind("<Leave>", _about_unbind, add="+")
+
+        body.columnconfigure(0, weight=1)
+        px = 36
+
+        # ── 헬퍼: 구분선 ──
+        def _divider(parent, pad_top=16, pad_bot=16):
+            tk.Frame(parent, bg=_LINE, height=1).pack(
+                fill="x", padx=px, pady=(pad_top, pad_bot))
+
+        # ══════════════════════════════════════════════════════════
+        # 타이틀
+        # ══════════════════════════════════════════════════════════
+        tk.Label(body, text="Binance Auto Trading Bot",
+                 bg=_BG, fg="#ffffff",
+                 font=("Malgun Gothic", 15, "bold")).pack(
+            anchor="w", padx=px, pady=(28, 2))
+        tk.Label(body, text=f"Version {APP_VERSION}",
+                 bg=_BG, fg=_GOLD,
+                 font=("Consolas", 11)).pack(anchor="w", padx=px, pady=(0, 0))
+
+        # ── 구분선 ──
+        _divider(body, pad_top=18, pad_bot=14)
+
+        # ══════════════════════════════════════════════════════════
+        # 프로그램 정보
+        # ══════════════════════════════════════════════════════════
+        info_items = [
+            ("엔진" if _is_ko else "Engine",
+             "Binance USDT-M Futures Auto Trading"),
+            ("전략" if _is_ko else "Strategy",
+             "복합 시그널 스코어링 + Kelly Criterion" if _is_ko else
+             "Composite Signal Scoring + Kelly Criterion"),
+            ("환경" if _is_ko else "Environment",
+             "테스트넷 / 실거래" if _is_ko else "Testnet / Live"),
+            ("언어" if _is_ko else "Language",
+             "한국어 / English"),
+        ]
+        for label, value in info_items:
+            row = tk.Frame(body, bg=_BG)
+            row.pack(fill="x", padx=px, pady=3)
+            tk.Label(row, text=label, bg=_BG, fg=_DIM, width=10, anchor="w",
+                     font=("Malgun Gothic", 9)).pack(side=tk.LEFT)
+            tk.Label(row, text=value, bg=_BG, fg=_FG, anchor="w",
+                     font=("Malgun Gothic", 9)).pack(side=tk.LEFT)
+
+        # ── 구분선 ──
+        _divider(body)
+
+        # ══════════════════════════════════════════════════════════
+        # 주요 기능
+        # ══════════════════════════════════════════════════════════
+        tk.Label(body,
+                 text="주요 기능" if _is_ko else "Key Features",
+                 bg=_BG, fg="#ffffff",
+                 font=("Malgun Gothic", 10, "bold")).pack(
+            anchor="w", padx=px, pady=(0, 10))
+
+        features = [
+            ("6개 지표 복합 시그널 스코어링" if _is_ko else
+             "6-indicator Composite Signal Scoring"),
+            ("Kelly Criterion + ATR 동적 포지션 사이징" if _is_ko else
+             "Kelly Criterion + ATR Dynamic Sizing"),
+            ("3단계 부분 익절 + ATR 트레일링 스탑" if _is_ko else
+             "3-level Partial TP + ATR Trailing Stop"),
+            ("메이커 우선 주문으로 수수료 절감" if _is_ko else
+             "Maker-first Orders for Fee Optimization"),
+            ("횡보장 자동 감지 및 방어" if _is_ko else
+             "Auto Chop Regime Detection & Defense"),
+            ("실시간 대시보드 모니터링" if _is_ko else
+             "Real-time Dashboard Monitoring"),
+        ]
+        for feat in features:
+            tk.Label(body, text=f"  ·  {feat}", bg=_BG, fg=_FG,
+                     font=("Malgun Gothic", 9), anchor="w").pack(
+                fill="x", padx=px, pady=2)
+
+        # ── 구분선 ──
+        _divider(body)
+
+        # ══════════════════════════════════════════════════════════
+        # 문의
+        # ══════════════════════════════════════════════════════════
+        tk.Label(body,
+                 text="문의 및 개선 요청" if _is_ko else "Contact & Feedback",
+                 bg=_BG, fg="#ffffff",
+                 font=("Malgun Gothic", 10, "bold")).pack(
+            anchor="w", padx=px, pady=(0, 6))
+
+        tk.Label(body,
+                 text=("버그 리포트, 기능 개선, 라이선스 문의" if _is_ko else
+                       "Bug reports, feature requests, license inquiries"),
+                 bg=_BG, fg=_DIM, justify="left",
+                 font=("Malgun Gothic", 9)).pack(anchor="w", padx=px, pady=(0, 10))
+
+        # 이메일 행 (배경 없이, 텍스트만)
+        email_row = tk.Frame(body, bg=_BG)
+        email_row.pack(fill="x", padx=px, pady=(0, 4))
+        tk.Label(email_row, text="autobot.trading2026@gmail.com",
+                 bg=_BG, fg=_GOLD,
+                 font=("Consolas", 10)).pack(side=tk.LEFT)
+
+        def _copy_email():
+            frame.clipboard_clear()
+            frame.clipboard_append("autobot.trading2026@gmail.com")
+            copy_lbl.configure(text="Copied!", fg=_GREEN)
+            frame.after(1500, lambda: copy_lbl.configure(
+                text="복사" if _is_ko else "Copy", fg=_DIM))
+
+        copy_lbl = tk.Label(email_row,
+                            text="복사" if _is_ko else "Copy",
+                            bg=_BG, fg=_DIM,
+                            font=("Malgun Gothic", 8),
+                            cursor="hand2")
+        copy_lbl.pack(side=tk.LEFT, padx=(12, 0))
+        copy_lbl.bind("<Button-1>", lambda e: _copy_email())
+
+        # ── 구분선 ──
+        _divider(body)
+
+        # ══════════════════════════════════════════════════════════
+        # 감사 + 면책
+        # ══════════════════════════════════════════════════════════
+        tk.Label(body,
+                 text=("이 프로그램을 이용해 주셔서 감사합니다.\n"
+                       "더 나은 서비스를 위해 지속적으로 개선하겠습니다." if _is_ko else
+                       "Thank you for using this program.\n"
+                       "We are committed to continuous improvement."),
+                 bg=_BG, fg=_FG, justify="left",
+                 font=("Malgun Gothic", 9)).pack(anchor="w", padx=px, pady=(0, 14))
+
+        tk.Label(body,
+                 text=("※ 본 소프트웨어는 투자 조언을 제공하지 않으며, "
+                       "자동 거래에 따른 모든 손익의 책임은 사용자에게 있습니다. "
+                       "테스트넷에서 충분히 검증한 후 실거래에 적용하시기 바랍니다." if _is_ko else
+                       "※ This software does not provide investment advice. "
+                       "All profits and losses are the user's responsibility. "
+                       "Please test on Testnet before Live trading."),
+                 bg=_BG, fg=_DIM, justify="left",
+                 font=("Malgun Gothic", 8),
+                 wraplength=520).pack(anchor="w", padx=px, pady=(0, 20))
+
+        # ── 저작권 ──
+        tk.Label(body,
+                 text="© 2026 Binance Auto Trading Bot",
+                 bg=_BG, fg="#303848",
+                 font=("Consolas", 8)).pack(pady=(4, 24))
 
     # ─────────────────────────────────────────────────────────────
     # 리포트 탭
@@ -3089,13 +3604,16 @@ class BotGUI:
                     canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
             except Exception:
                 pass
-        _env_mw_id = canvas.bind_all("<MouseWheel>", _env_mousewheel, add="+")
-        def _env_cleanup_mousewheel(*_):
-            try:
-                canvas.unbind_all("<MouseWheel>")
-            except Exception:
-                pass
-        canvas.bind("<Destroy>", _env_cleanup_mousewheel, add="+")
+        def _env_bind_mw(e=None):
+            canvas.bind_all("<MouseWheel>", _env_mousewheel)
+        def _env_unbind_mw(e=None):
+            try: canvas.unbind_all("<MouseWheel>")
+            except Exception: pass
+        frame.bind("<Visibility>", _env_bind_mw, add="+")
+        canvas.bind("<Enter>", _env_bind_mw, add="+")
+        canvas.bind("<Leave>", _env_unbind_mw, add="+")
+        body.bind("<Enter>", _env_bind_mw, add="+")
+        body.bind("<Leave>", _env_unbind_mw, add="+")
 
         # 이하 body에 pack (기존 frame → body로 변경)
         _is_ko = self.language == "ko"
@@ -3296,10 +3814,10 @@ class BotGUI:
         style.map("Env.TRadiobutton", background=[("selected", "#181A20")], foreground=[("selected", "#2EBD85")])
         style.configure("EnvLive.TRadiobutton", background="#181A20", foreground="#f5f7ff", font=("Malgun Gothic", 11, "bold"))
         style.map("EnvLive.TRadiobutton", background=[("selected", "#181A20")], foreground=[("selected", "#F0B90B")])
-        style.configure("EnvSave.TButton", background="#181A20", foreground="#f5f7ff", font=("Malgun Gothic", 11, "bold"), padding=(20, 8))
-        style.map("EnvSave.TButton", background=[("active", "#1f2128")], foreground=[("active", "#f5f7ff")])
-        style.configure("EnvDefault.TButton", background="#181A20", foreground="#f5f7ff", font=("Malgun Gothic", 11, "bold"), padding=(20, 8))
-        style.map("EnvDefault.TButton", background=[("active", "#1f2128")], foreground=[("active", "#f5f7ff")])
+        style.configure("EnvSave.TButton", background="#1e2d3d", foreground="#7ecbf5", font=("Malgun Gothic", 10, "bold"), padding=(20, 8))
+        style.map("EnvSave.TButton", background=[("active", "#2a4060")], foreground=[("active", "#ffffff")])
+        style.configure("EnvDefault.TButton", background="#1e2230", foreground="#8892a8", font=("Malgun Gothic", 10), padding=(20, 8))
+        style.map("EnvDefault.TButton", background=[("active", "#2a3040")], foreground=[("active", "#c8cfe8")])
         testnet_btn = ttk.Radiobutton(env_frame, text="TESTNET", value="TESTNET", variable=env_choice, command=lambda: set_env("TESTNET"), style="Env.TRadiobutton")
         live_btn = ttk.Radiobutton(env_frame, text="LIVE", value="LIVE", variable=env_choice, command=lambda: set_env("LIVE"), style="EnvLive.TRadiobutton")
         testnet_btn.pack(side=tk.LEFT, padx=(0, 20))
@@ -3417,10 +3935,11 @@ class BotGUI:
                     if not os.environ.get(env_var):
                         missing_env.append(env_var)
                 if missing_env:
+                    _warn_parent = settings_dialog if settings_dialog.winfo_exists() else None
                     self._show_warning(
                         self._t("api_env_check_title","API 환경 변수 확인"),
                         self._t("api_env_missing_msg","아직 설정되지 않은 환경 변수가 있습니다.") + "\n" + "\n".join(missing_env),
-                        parent=settings_dialog,
+                        parent=_warn_parent,
                     )
 
         # btn_container는 상단에서 이미 생성 (side=BOTTOM, 스크롤 영역 밖)
@@ -6229,6 +6748,7 @@ class BotGUI:
 
         win = tk.Toplevel(self.root)
         win.title("🧠 AI Trading Assistant")
+        self._apply_icon(win)
         win.configure(bg=_BG)
         win.geometry(f"{_W}x{_H}")
         win.minsize(360, 500)
@@ -6707,6 +7227,10 @@ class BotGUI:
             + "변경 후 GUI를 재시작해야 적용됩니다.")
         )
         box(("API Credentials Error" if self.language == "en" else "API 자격 증명 오류"), message)
+        # API 키 오류 후 시작하기 다이얼로그 띄움
+        has_key = bool(os.environ.get("BINANCE_API_KEY") or os.environ.get("TESTNET_API_KEY"))
+        if not has_key:
+            self.root.after(300, self._show_referral_onboarding)
 
     def _startup_script_path(self):
         startup_dir = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
@@ -6891,6 +7415,7 @@ class BotGUI:
         analysis = self._analyze_filter_logs()
         dialog = tk.Toplevel(self.root)
         dialog.title("Log Analysis" if self.language == "en" else "실시간 로그 분석")
+        self._apply_icon(dialog)
         width, height = 520, 360
         dialog.geometry(f"{width}x{height}")
         dialog.configure(bg="#181A20")
@@ -6912,6 +7437,7 @@ class BotGUI:
         tracked = self._extract_symbol_watchlist()
         dialog = tk.Toplevel(self.root)
         dialog.title(self._t("watchlist_title","거래 대상 심볼 상태"))
+        self._apply_icon(dialog)
         width, height = 520, 380
         dialog.geometry(f"{width}x{height}")
         dialog.configure(bg="#181A20")
@@ -7614,6 +8140,7 @@ class BotGUI:
 
         dialog = tk.Toplevel(self.root)
         dialog.title(self._t("trade_confirm_title","Order confirmation"))
+        self._apply_icon(dialog)
         dialog.configure(bg="#0C1017", highlightthickness=1, highlightbackground="#394058")
         dialog.resizable(False, False)
         dialog.transient(self.root)
@@ -7702,6 +8229,22 @@ class BotGUI:
             window.geometry(f"{width}x{height}+{x}+{y}")
         except Exception:
             pass
+
+    def _apply_icon(self, toplevel):
+        """Toplevel 창에 앱 아이콘을 적용한다."""
+        try:
+            _ico = os.path.join(BASE_DIR, "assets", "bot_converted.ico")
+            if not os.path.isfile(_ico):
+                _ico = os.path.join(BASE_DIR, "assets", "bot.ico")
+            if os.path.isfile(_ico):
+                toplevel.iconbitmap(_ico)
+        except Exception:
+            try:
+                _png = os.path.join(BASE_DIR, "assets", "bot.ico")
+                _img = tk.PhotoImage(file=_png)
+                toplevel.iconphoto(True, _img)
+            except Exception:
+                pass
 
     def _trim_file(self, path, *, max_bytes=MAX_LOG_BYTES, keep_bytes=LOG_KEEP_BYTES):
         if keep_bytes >= max_bytes:
@@ -8274,25 +8817,10 @@ class BotGUI:
         self._write_consent_audit(ack1=ack1, ack2=ack2, fully_acked=fully_acked)
         if fully_acked:
             self._append_log("[INFO] " + self._t("risk_ack_complete", "위험 고지 동의 완료"))
-            # 동의 완료 후 환경변수 미설정 시 환경설정 탭으로 자동 이동
-            missing_env = [v for v in ("TESTNET_API_KEY", "TESTNET_API_SECRET", "BINANCE_API_KEY", "BINANCE_API_SECRET") if not os.environ.get(v)]
-            if missing_env:
-                _is_ko = self.language == "ko"
-                from tkinter import messagebox as _mb
-                _mb.showinfo(
-                    "환경 변수 설정 필요" if _is_ko else "Environment Variables Required",
-                    ("동의가 완료되었습니다!\n\n"
-                     "봇을 실행하려면 API 키를 환경변수로 등록해야 합니다.\n"
-                     "환경설정 탭으로 이동합니다. 하단의 설정 가이드를 참고하세요."
-                     if _is_ko else
-                     "Agreement complete!\n\n"
-                     "To run the bot, you need to register API keys as environment variables.\n"
-                     "Moving to the Environment tab. See the setup guide below.")
-                )
-                try:
-                    self._settings_show_section("env")
-                except Exception:
-                    pass
+            # 동의 완료 후 API 키 미설정 시 → 시작하기(레퍼럴 온보딩) 다이얼로그
+            has_key = bool(os.environ.get("BINANCE_API_KEY") or os.environ.get("TESTNET_API_KEY"))
+            if not has_key:
+                self.root.after(300, self._show_referral_onboarding)
         elif not acknowledged:
             self._append_log("[WARN] " + self._t("risk_ack_revoked", "위험 고지 동의가 해제되었습니다"))
 
@@ -9876,6 +10404,7 @@ class BotGUI:
         dialog = tk.Toplevel(self.root)
         _title = self._t("alert", "Notice")
         dialog.title(_title)
+        self._apply_icon(dialog)
         width, height = 380, 200
         dialog.configure(bg="#0C1017", highlightthickness=1, highlightbackground="#394058")
         dialog.resizable(False, False)
