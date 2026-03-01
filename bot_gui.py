@@ -2235,6 +2235,7 @@ class BotGUI:
             sections[key].pack(fill=tk.BOTH, expand=True)
             for name, btn in buttons.items():
                 btn.configure(bg="#191f2b" if name == key else "#0c1017")
+        self._settings_show_section = show_section
         tabs = [
             ("env",     self._t("settings_tab_env",    "환경설정")),
             ("display", self._t("settings_tab_display", "화면설정")),
@@ -3062,12 +3063,37 @@ class BotGUI:
 
     def _build_env_tab(self, frame):
         frame.columnconfigure(0, weight=1)
+
+        # ── 스크롤 가능한 컨테이너 구성 ──
+        btn_container = tk.Frame(frame, bg="#181A20")
+        btn_container.pack(side=tk.BOTTOM, fill="x", padx=40, pady=(8, 12))
+        tk.Frame(btn_container, bg="#343942", height=1).pack(fill="x")
+
+        canvas = tk.Canvas(frame, bg="#181A20", highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        body = tk.Frame(canvas, bg="#181A20")
+        canvas.create_window((0, 0), window=body, anchor="nw")
+        def _on_env_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_env_configure)
+        def _on_env_canvas_configure(event):
+            canvas.itemconfig(canvas.find_withtag("all")[0], width=event.width)
+        canvas.bind("<Configure>", _on_env_canvas_configure)
+        def _env_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _env_mousewheel, add="+")
+
+        # 이하 body에 pack (기존 frame → body로 변경)
         entry_pad = {"padx": 40, "pady": (0, 10)}
 
-        tk.Label(frame, text=self._t("api_settings_title","API 설정"), bg="#181A20", fg="white", font=("Malgun Gothic", 13, "bold"), anchor="w").pack(fill="x", padx=40, pady=(30, 12))
+        tk.Label(body, text=self._t("api_settings_title","API 설정"), bg="#181A20", fg="white", font=("Malgun Gothic", 13, "bold"), anchor="w").pack(fill="x", padx=40, pady=(30, 12))
         guidance = self._t("env_guidance", "")
         tk.Label(
-            frame,
+            body,
             text=guidance,
             bg="#181A20",
             fg="#c0c6dc",
@@ -3076,7 +3102,7 @@ class BotGUI:
             wraplength=720,
         ).pack(fill="x", padx=40, pady=(0, 12))
 
-        status_frame = tk.Frame(frame, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
+        status_frame = tk.Frame(body, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
         status_frame.pack(fill="x", padx=40, pady=(0, 20))
         env_rows = [
             ("TESTNET_API_KEY", self._t("env_label_testnet_key","테스트넷 API Key")),
@@ -3099,10 +3125,10 @@ class BotGUI:
             tk.Label(row, text=status_text, bg="#1c1f2b", fg=status_color, font=("Malgun Gothic", 10, "bold")).pack(side=tk.RIGHT)
 
         # ── [PATCH-11] 바이낸스 레퍼럴 코드 설정 ──
-        tk.Label(frame, text=self._t("referral_title", "레퍼럴 코드 / Referral Code"),
+        tk.Label(body, text=self._t("referral_title", "레퍼럴 코드 / Referral Code"),
                  bg="#181A20", fg="#c0c6dc", font=("Malgun Gothic", 10, "bold"),
                  anchor="w").pack(fill="x", padx=40, pady=(20, 6))
-        ref_frame = tk.Frame(frame, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
+        ref_frame = tk.Frame(body, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
         ref_frame.pack(fill="x", padx=40, pady=(0, 4))
         ref_inner = tk.Frame(ref_frame, bg="#1c1f2b")
         ref_inner.pack(fill="x", padx=16, pady=10)
@@ -3141,10 +3167,10 @@ class BotGUI:
                  font=("Malgun Gothic", 9), anchor="w"
                  ).pack(fill="x", padx=16, pady=(0, 10))
 
-        tk.Label(frame, text=self._t("default_env_title","기본 실행 환경"), bg="#181A20", fg="#c0c6dc", font=("Malgun Gothic", 10, "bold"), anchor="w").pack(fill="x", padx=40, pady=(20, 6))
+        tk.Label(body, text=self._t("default_env_title","기본 실행 환경"), bg="#181A20", fg="#c0c6dc", font=("Malgun Gothic", 10, "bold"), anchor="w").pack(fill="x", padx=40, pady=(20, 6))
         current_env = self.env_mode if self.env_mode in {"TESTNET", "LIVE"} else ("TESTNET" if self.settings_data.get("default_env_testnet", True) else "LIVE")
         env_choice = tk.StringVar(value=current_env)
-        env_frame = tk.Frame(frame, bg="#181A20")
+        env_frame = tk.Frame(body, bg="#181A20")
         env_frame.pack(fill="x", padx=40)
         def set_env(value):
             # [PATCH-5] LIVE 전환 시 확인 다이얼로그
@@ -3169,18 +3195,18 @@ class BotGUI:
         style.map("Env.TRadiobutton", background=[("selected", "#181A20")], foreground=[("selected", "#2EBD85")])
         style.configure("EnvLive.TRadiobutton", background="#181A20", foreground="#f5f7ff", font=("Malgun Gothic", 11, "bold"))
         style.map("EnvLive.TRadiobutton", background=[("selected", "#181A20")], foreground=[("selected", "#F0B90B")])
-        style.configure("EnvSave.TButton", background="#181A20", foreground="#f5f7ff", font=("Malgun Gothic", 11, "bold"))
+        style.configure("EnvSave.TButton", background="#181A20", foreground="#f5f7ff", font=("Malgun Gothic", 11, "bold"), padding=(20, 8))
         style.map("EnvSave.TButton", background=[("active", "#1f2128")], foreground=[("active", "#f5f7ff")])
-        style.configure("EnvDefault.TButton", background="#181A20", foreground="#f5f7ff", font=("Malgun Gothic", 11, "bold"), padding=(12, 4))
+        style.configure("EnvDefault.TButton", background="#181A20", foreground="#f5f7ff", font=("Malgun Gothic", 11, "bold"), padding=(20, 8))
         style.map("EnvDefault.TButton", background=[("active", "#1f2128")], foreground=[("active", "#f5f7ff")])
         testnet_btn = ttk.Radiobutton(env_frame, text="TESTNET", value="TESTNET", variable=env_choice, command=lambda: set_env("TESTNET"), style="Env.TRadiobutton")
         live_btn = ttk.Radiobutton(env_frame, text="LIVE", value="LIVE", variable=env_choice, command=lambda: set_env("LIVE"), style="EnvLive.TRadiobutton")
         testnet_btn.pack(side=tk.LEFT, padx=(0, 20))
         live_btn.pack(side=tk.LEFT)
 
-        tk.Label(frame, text=self._t("language_title","언어 / Language"), bg="#181A20", fg="#c0c6dc", font=("Malgun Gothic", 10, "bold"), anchor="w").pack(fill="x", padx=40, pady=(20, 6))
+        tk.Label(body, text=self._t("language_title","언어 / Language"), bg="#181A20", fg="#c0c6dc", font=("Malgun Gothic", 10, "bold"), anchor="w").pack(fill="x", padx=40, pady=(20, 6))
         language_var = tk.StringVar(value=self.language)
-        lang_frame = tk.Frame(frame, bg="#181A20")
+        lang_frame = tk.Frame(body, bg="#181A20")
         lang_frame.pack(fill="x", padx=40)
         ttk.Radiobutton(lang_frame, text="한국어 (Korean)", value="ko", variable=language_var, style="Env.TRadiobutton").pack(side=tk.LEFT, padx=(0, 20))
         ttk.Radiobutton(lang_frame, text="English", value="en", variable=language_var, style="EnvLive.TRadiobutton").pack(side=tk.LEFT)
@@ -3215,8 +3241,59 @@ class BotGUI:
             update_indicator()
             return row
 
-        build_custom_checkbox(frame, self._t("env_notify_popup","주문/체결 완료 시 알림 팝업"), notify_var, pady=(12, 0))
-        build_custom_checkbox(frame, self._t("env_auto_start","Windows 시작 시 자동 실행"), auto_start_var, pady=(6, 0))
+        build_custom_checkbox(body, self._t("env_notify_popup","주문/체결 완료 시 알림 팝업"), notify_var, pady=(12, 0))
+        build_custom_checkbox(body, self._t("env_auto_start","Windows 시작 시 자동 실행"), auto_start_var, pady=(6, 0))
+
+        # ── 환경변수 설정 가이드 ──
+        _env_guide_title = (
+            "📋 환경변수 설정 방법" if _is_ko else "📋 How to Set Environment Variables"
+        )
+        tk.Label(body, text=_env_guide_title, bg="#181A20", fg="#c0c6dc",
+                 font=("Malgun Gothic", 10, "bold"), anchor="w"
+                 ).pack(fill="x", padx=40, pady=(20, 6))
+
+        _env_guide_frame = tk.Frame(body, bg="#1c1f2b", highlightbackground="#343942", highlightthickness=1)
+        _env_guide_frame.pack(fill="x", padx=40, pady=(0, 20))
+
+        if _is_ko:
+            _guide_steps = (
+                "① Windows 검색창에 '환경 변수' 입력 → '시스템 환경 변수 편집' 클릭\n"
+                "② '환경 변수(N)...' 버튼 클릭\n"
+                "③ '사용자 변수' 영역에서 '새로 만들기(N)...' 클릭\n"
+                "④ 아래 변수명과 값을 하나씩 추가:\n\n"
+                "   테스트넷:\n"
+                "     변수명: TESTNET_API_KEY      값: 발급받은 테스트넷 API Key\n"
+                "     변수명: TESTNET_API_SECRET  값: 발급받은 테스트넷 Secret Key\n\n"
+                "   실거래:\n"
+                "     변수명: BINANCE_API_KEY       값: 발급받은 실거래 API Key\n"
+                "     변수명: BINANCE_API_SECRET   값: 발급받은 실거래 Secret Key\n\n"
+                "⑤ 모두 입력 후 '확인' 버튼 클릭 (모든 창)\n"
+                "⑥ 이 프로그램을 완전히 종료 후 다시 실행"
+            )
+        else:
+            _guide_steps = (
+                "① Search 'Environment Variables' in Windows → Click 'Edit system environment variables'\n"
+                "② Click 'Environment Variables...' button\n"
+                "③ Under 'User variables', click 'New...'\n"
+                "④ Add the following variables one by one:\n\n"
+                "   Testnet:\n"
+                "     Name: TESTNET_API_KEY       Value: Your testnet API Key\n"
+                "     Name: TESTNET_API_SECRET  Value: Your testnet Secret Key\n\n"
+                "   Live:\n"
+                "     Name: BINANCE_API_KEY        Value: Your live API Key\n"
+                "     Name: BINANCE_API_SECRET   Value: Your live Secret Key\n\n"
+                "⑤ Click 'OK' on all dialogs\n"
+                "⑥ Close and restart this program"
+            )
+
+        tk.Label(_env_guide_frame, text=_guide_steps,
+                 bg="#1c1f2b", fg="#f5f7ff",
+                 font=("Consolas", 9), anchor="w", justify="left",
+                 wraplength=650
+                 ).pack(fill="x", padx=16, pady=12)
+
+        # 하단 여백
+        tk.Frame(body, bg="#181A20", height=20).pack(fill="x")
 
         def save_env():
             settings_dialog = frame.winfo_toplevel()
@@ -3293,16 +3370,14 @@ class BotGUI:
                         parent=settings_dialog,
                     )
 
-        btn_container = tk.Frame(frame, bg="#181A20")
-        btn_container.pack(side=tk.BOTTOM, fill="x", padx=40, pady=20)
-
+        # btn_container는 상단에서 이미 생성 (side=BOTTOM, 스크롤 영역 밖)
         def restore_env_defaults():
             env_choice.set("TESTNET")
             language_var.set("ko")
 
         btn_row = tk.Frame(btn_container, bg="#181A20")
-        btn_row.pack(anchor="e")
-        ttk.Button(btn_row, text=self._t("defaults","DEFAULT"), command=restore_env_defaults, style="EnvDefault.TButton").pack(side=tk.LEFT, padx=(0, 8))
+        btn_row.pack(anchor="e", padx=20, pady=8)
+        ttk.Button(btn_row, text=self._t("defaults","DEFAULT"), command=restore_env_defaults, style="EnvDefault.TButton").pack(side=tk.LEFT, padx=(0, 12))
         ttk.Button(btn_row, text=self._t("save","SAVE"), command=save_env, style="EnvSave.TButton").pack(side=tk.LEFT)
 
     def _build_trade_tab(self, frame):
@@ -4545,7 +4620,7 @@ class BotGUI:
             change_mode("balanced", user=False)
 
         default_btn = ttk.Button(trade_btn_row, text="DEFAULT", command=restore_trade_defaults, style="EnvDefault.TButton")
-        default_btn.pack(side=tk.LEFT, padx=(0, 8))
+        default_btn.pack(side=tk.LEFT, padx=(0, 12))
         save_btn = ttk.Button(trade_btn_row, text="SAVE", command=save_trade, style="EnvSave.TButton")
         save_btn.pack(side=tk.LEFT)
 
@@ -4857,8 +4932,8 @@ class BotGUI:
                 parent=parent_w)
 
         display_btn_row = tk.Frame(display_btn_container, bg="#181A20")
-        display_btn_row.pack(anchor="e")
-        ttk.Button(display_btn_row, text="DEFAULT", command=restore_display_defaults, style="EnvDefault.TButton").pack(side=tk.LEFT, padx=(0, 8))
+        display_btn_row.pack(anchor="e", padx=20, pady=8)
+        ttk.Button(display_btn_row, text="DEFAULT", command=restore_display_defaults, style="EnvDefault.TButton").pack(side=tk.LEFT, padx=(0, 12))
         ttk.Button(display_btn_row, text="SAVE", command=save_display, style="EnvSave.TButton").pack(side=tk.LEFT)
 
     # ------------------------------------------------------------------
@@ -8146,6 +8221,25 @@ class BotGUI:
         self._write_consent_audit(ack1=ack1, ack2=ack2, fully_acked=fully_acked)
         if fully_acked:
             self._append_log("[INFO] " + self._t("risk_ack_complete", "위험 고지 동의 완료"))
+            # 동의 완료 후 환경변수 미설정 시 환경설정 탭으로 자동 이동
+            missing_env = [v for v in ("TESTNET_API_KEY", "TESTNET_API_SECRET", "BINANCE_API_KEY", "BINANCE_API_SECRET") if not os.environ.get(v)]
+            if missing_env:
+                _is_ko = self.language == "ko"
+                from tkinter import messagebox as _mb
+                _mb.showinfo(
+                    "환경 변수 설정 필요" if _is_ko else "Environment Variables Required",
+                    ("동의가 완료되었습니다!\n\n"
+                     "봇을 실행하려면 API 키를 환경변수로 등록해야 합니다.\n"
+                     "환경설정 탭으로 이동합니다. 하단의 설정 가이드를 참고하세요."
+                     if _is_ko else
+                     "Agreement complete!\n\n"
+                     "To run the bot, you need to register API keys as environment variables.\n"
+                     "Moving to the Environment tab. See the setup guide below.")
+                )
+                try:
+                    self._settings_show_section("env")
+                except Exception:
+                    pass
         elif not acknowledged:
             self._append_log("[WARN] " + self._t("risk_ack_revoked", "위험 고지 동의가 해제되었습니다"))
 
