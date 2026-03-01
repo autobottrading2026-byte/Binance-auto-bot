@@ -2020,8 +2020,8 @@ class TickEngine:
         self.config.watch_limit = max(_wl_floor, self.config.watch_limit)
         self.config.max_open_symbols = max(_mo_floor, self.config.max_open_symbols)
         # [PATCH-14] HARD_CAPS 참조로 변경 (하드코딩 제거)
-        _hc_lev_min = HARD_CAPS.get("leverage_min", (1, 5))
-        _hc_lev_max = HARD_CAPS.get("leverage_max", (2, 12))
+        _hc_lev_min = self.HARD_CAPS.get("leverage_min", (1, 5))
+        _hc_lev_max = self.HARD_CAPS.get("leverage_max", (2, 12))
         self.config.leverage_min = max(float(_hc_lev_min[0]), min(self.config.leverage_min, float(_hc_lev_min[1])))
         self.config.leverage_max = max(self.config.leverage_min + 1.0, min(self.config.leverage_max, float(_hc_lev_max[1])))
         if "auto_tune_mode" in params:
