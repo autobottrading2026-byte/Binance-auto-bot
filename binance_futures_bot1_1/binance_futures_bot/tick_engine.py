@@ -177,7 +177,7 @@ class TickEngine:
         self._returns_window_sec = 1800
         self._rv_short_window = 300
         self._rv_long_window = 900
-        base_budget = float(getattr(self.config, "total_risk_budget", getattr(self.config, "position_pct", 0.10)))
+        base_budget = float(getattr(self.config, "total_risk_budget", getattr(self.config, "position_pct", 0.06)))  # [PATCH-14] 0.10→0.06 config 정렬
         self.total_risk_budget = max(base_budget, 0.01)
         self.config.total_risk_budget = self.total_risk_budget
         self.session_loss_limit_pct = max(0.0, float(getattr(self.config, "session_loss_limit_pct", 0.0)))
@@ -807,7 +807,7 @@ class TickEngine:
                 )
                 _mo_restore = max(
                     getattr(self, "_user_max_open_symbols", 0),
-                    int(getattr(self.config, "max_open_symbols", 5))
+                    int(getattr(self.config, "max_open_symbols", 10))  # [PATCH-14] 5→10 config 정렬
                 )
                 if _wl_restore > 0:
                     loaded["watch_limit"] = _wl_restore
@@ -1187,12 +1187,12 @@ class TickEngine:
 
     def _leverage_cap(self) -> float:
         rv_ratio = self._rv_ratio()
-        base_cap = float(getattr(self.config, "leverage_max", 50.0) or 50.0)
+        base_cap = float(getattr(self.config, "leverage_max", 10.0) or 10.0)  # [PATCH-14] 50→10 config 정렬
         if rv_ratio > 1.5:
             cap = base_cap / rv_ratio
         else:
             cap = base_cap
-        return max(5.0, min(100.0, cap))
+        return max(1.0, min(12.0, cap))  # [PATCH-14] HARD_CAPS 범위(1~12) 정렬
 
     def _stat_ratio(self, numerator_key: str, denominator_key: str) -> float:
         numerator = self._stat_sum(self._stat_window.get(numerator_key, deque()))
@@ -2008,7 +2008,7 @@ class TickEngine:
             self.config.leverage_min = max(1.0, self.config.leverage_max - 1.0)
         if "max_loss_per_position" in params:
             # [PATCH-8] 손절 상한 5.0→2.5%: auto-tuner가 손절폭을 넓히지 못하게
-            raw_sl = max(0.5, min(2.5, float(params["max_loss_per_position"])))
+            raw_sl = max(0.5, min(2.2, float(params["max_loss_per_position"])))  # [PATCH-14] 2.5→2.2 HARD_CAPS 정렬
             self._assign_rate_limited("max_loss_per_position", raw_sl)
         # watch_limit / max_open_symbols: 사용자 설정값이 있으면 그것을 우선 사용
         # (auto-tune 적용 후에도 사용자가 UI에서 지정한 값 아래로 내려가지 않도록)
@@ -2019,8 +2019,11 @@ class TickEngine:
         _mo_floor = max(int(getattr(self.config, "max_open_symbols", 10)), _user_mo) if _user_mo > 0 else int(getattr(self.config, "max_open_symbols", 10))
         self.config.watch_limit = max(_wl_floor, self.config.watch_limit)
         self.config.max_open_symbols = max(_mo_floor, self.config.max_open_symbols)
-        self.config.leverage_min = max(1.0, min(self.config.leverage_min, 10.0))
-        self.config.leverage_max = max(self.config.leverage_min + 1.0, min(self.config.leverage_max, 10.0))
+        # [PATCH-14] HARD_CAPS 참조로 변경 (하드코딩 제거)
+        _hc_lev_min = HARD_CAPS.get("leverage_min", (1, 5))
+        _hc_lev_max = HARD_CAPS.get("leverage_max", (2, 12))
+        self.config.leverage_min = max(float(_hc_lev_min[0]), min(self.config.leverage_min, float(_hc_lev_min[1])))
+        self.config.leverage_max = max(self.config.leverage_min + 1.0, min(self.config.leverage_max, float(_hc_lev_max[1])))
         if "auto_tune_mode" in params:
             self.config.auto_tune_mode = str(params.get("auto_tune_mode", self.config.auto_tune_mode))
         self._apply_hard_caps()
@@ -2083,7 +2086,7 @@ class TickEngine:
         cap = self._leverage_cap()
         target = min(target, cap)
         target = max(min_lev, min(max_lev, target))
-        hard_max = min(150, int(getattr(self.config, "leverage_max", 150)))
+        hard_max = min(12, int(getattr(self.config, "leverage_max", 10)))  # [PATCH-14] 150→12 HARD_CAPS 정렬
         result = max(1, min(hard_max, int(round(target))))
         logger.info("Leverage calc: ratio=%.2f neural=%.2f vol=%.3f → base=%.1f mult=%.2f → %dx",
                      ratio, neural_prob, volatility, base_target, neural_mult * vol_mult, result)
@@ -2091,7 +2094,7 @@ class TickEngine:
 
     async def _ensure_symbol_leverage(self, symbol: str, leverage: int) -> bool:
         """레버리지 설정. 성공 시 True, 실패 시 False 반환."""
-        leverage = max(1, min(125, int(leverage)))
+        leverage = max(1, min(12, int(leverage)))  # [PATCH-14] 125→12 HARD_CAPS 정렬
         if leverage <= 0:
             return False
         min_allowed, max_allowed, step = await self._symbol_leverage_limits(symbol)
@@ -3028,7 +3031,7 @@ class TickEngine:
         if not getattr(self.config, "enable_take_profit", False) and not getattr(self.config, "enable_profit_exit_layer", False):
             return
         snap_map = {snap.symbol: snap for snap in symbol_snaps}
-        trail_mult = max(float(getattr(self.config, "trail_atr_mult", 1.0)), 0.1)
+        trail_mult = max(float(getattr(self.config, "trail_atr_mult", 1.7)), 0.1)  # [PATCH-14] 1.0→1.7 config 정렬
         trail_step = max(float(getattr(self.config, "trail_min_step_pct", 0.001)), 0.0)
         for symbol, snapshot in list(self.position_snapshots.items()):
             if not snapshot.trail_active:
@@ -3303,7 +3306,7 @@ class TickEngine:
         _effective_activate = max(activate_pct, _fee_min * 1.2)  # 수수료의 120% 이상일 때만 활성화
         if roi_percent < _effective_activate:
             return False
-        trail_mult = max(float(getattr(self.config, "trail_atr_mult", 3.0)), 0.1)
+        trail_mult = max(float(getattr(self.config, "trail_atr_mult", 1.7)), 0.1)  # [PATCH-14] 3.0→1.7 config 정렬
         interval = max(int(getattr(self.config, "trail_recalc_interval_sec", 5)), 1)
         now = time.time()
         last_calc = snapshot.trail_last_update_ts or 0.0
@@ -3943,7 +3946,7 @@ class TickEngine:
                         composite += float(getattr(self.config, "regime_short_bonus_trend_down", 0.15))
                     else:
                         composite += float(getattr(self.config, "regime_long_penalty_trend_down", -0.10))
-            min_composite = float(getattr(self.config, "composite_min_score", 0.72))  # [PATCH-9] 0.75→0.72
+            min_composite = float(getattr(self.config, "composite_min_score", 0.80))  # [PATCH-14] 0.72→0.80 config 정렬
             # [PATCH-12] chop 레짐에서 진입 임계값 상향
             if regime == "chop":
                 min_composite = float(getattr(self.config, "chop_composite_min_score", 0.85))

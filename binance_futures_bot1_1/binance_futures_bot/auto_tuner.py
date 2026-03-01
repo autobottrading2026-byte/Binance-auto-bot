@@ -154,10 +154,10 @@ class AutoTuner:
             "volatility_min": max(0.001, min(0.005, float(getattr(config, "volatility_min", 0.002)))),
             "watch_limit": getattr(config, "watch_limit", 10),
             "max_open_symbols": getattr(config, "max_open_symbols", 10),
-            "position_pct": max(float(getattr(config, "position_pct", 0.05)), 0.005),
-            "leverage_min": float(getattr(config, "leverage_min", 5)),
-            "leverage_max": float(getattr(config, "leverage_max", 25)),
-            "max_loss_per_position": float(getattr(config, "max_loss_per_position", 55.0)),
+            "position_pct": max(float(getattr(config, "position_pct", 0.06)), 0.005),  # [PATCH-14] 0.05→0.06
+            "leverage_min": float(getattr(config, "leverage_min", 1)),      # [PATCH-14] 5→1
+            "leverage_max": float(getattr(config, "leverage_max", 10)),      # [PATCH-14] 25→10
+            "max_loss_per_position": float(getattr(config, "max_loss_per_position", 1.8)),  # [PATCH-14] 55.0→1.8
         }
         self.current_mode = str(getattr(config, "auto_tune_mode", "balanced") or "balanced").lower()
         if self.current_mode not in {"aggressive", "balanced", "conservative"}:
@@ -182,10 +182,10 @@ class AutoTuner:
             "volatility_min": (0.0010, 0.0060),  # 상한 0.012→0.006 (너무 높으면 진입 불가)
             "watch_limit": (10, 20),  # 최소 10개 심볼 감시 (5→10 상향!)
             "max_open_symbols": (5, 12),  # 최소 5개 포지션 (2→5 상향!)
-            "position_pct": (0.03, 0.12),  # 최솟값 0.03 → 소잔고에서 min_margin 충족
-            "leverage_min": (1, 60),
-            "leverage_max": (10, 120),
-            "max_loss_per_position": (5.0, 60.0),
+            "position_pct": (0.03, 0.08),   # [PATCH-14] 0.12→0.08 risk_limits 정렬
+            "leverage_min": (1, 5),         # [PATCH-14] 60→5 risk_limits 정렬
+            "leverage_max": (3, 12),        # [PATCH-14] 120→12 risk_limits 정렬
+            "max_loss_per_position": (0.5, 2.2),  # [PATCH-14] 60→2.2 risk_limits 정렬
         }
         self.clamps = dict(self.base_clamps)
         # per-cycle step limits
@@ -203,12 +203,12 @@ class AutoTuner:
         self.max_step = dict(self.base_step)
         self.mode_profiles = {
             "aggressive": {
-                "position_pct": (0.03, 0.18),
-                "watch_limit": (12, 20),  # 최소 12개 (6→12 상향!)
-                "max_open_symbols": (6, 14),  # 최소 6개 (4→6 상향!)
-                "leverage_min": (2, 90),
-                "leverage_max": (15, 100),  # 손실 시 레버 감소 가능하도록 하한 완화
-                "max_loss_per_position": (10.0, 60.0),
+                "position_pct": (0.03, 0.08),       # [PATCH-14] 0.18→0.08 risk_limits 정렬
+                "watch_limit": (12, 20),
+                "max_open_symbols": (6, 14),
+                "leverage_min": (1, 5),              # [PATCH-14] 90→5 risk_limits 정렬
+                "leverage_max": (3, 12),             # [PATCH-14] 100→12 risk_limits 정렬
+                "max_loss_per_position": (0.5, 2.2), # [PATCH-14] 60→2.2 risk_limits 정렬
                 "step_scale": 1.4,
                 "risk_bias_up": 0.62,
                 "risk_bias_down": 0.32,
@@ -216,12 +216,12 @@ class AutoTuner:
                 "pnl_loss_floor": -0.008,
             },
             "balanced": {
-                "position_pct": (0.02, 0.12),
-                "watch_limit": (10, 20),  # 최소 10개 (5→10 상향!)
-                "max_open_symbols": (5, 12),  # 최소 5개 (3→5 상향!)
-                "leverage_min": (1.5, 80),
-                "leverage_max": (10, 100),  # 손실 시 레버 감소 가능하도록 하한 완화
-                "max_loss_per_position": (8.0, 55.0),
+                "position_pct": (0.03, 0.08),        # [PATCH-14] 0.12→0.08 risk_limits 정렬
+                "watch_limit": (10, 20),
+                "max_open_symbols": (5, 12),
+                "leverage_min": (1, 5),               # [PATCH-14] 80→5 risk_limits 정렬
+                "leverage_max": (3, 12),              # [PATCH-14] 100→12 risk_limits 정렬
+                "max_loss_per_position": (0.5, 2.2),  # [PATCH-14] 55→2.2 risk_limits 정렬
                 "step_scale": 1.0,
                 "risk_bias_up": 0.70,
                 "risk_bias_down": 0.35,
@@ -229,12 +229,12 @@ class AutoTuner:
                 "pnl_loss_floor": -0.006,
             },
             "conservative": {
-                "position_pct": (0.02, 0.08),  # conservative 하한 0.02
-                "watch_limit": (8, 15),  # 최소 8개 (4→8 상향!)
-                "max_open_symbols": (4, 10),  # 최소 4개 (2→4 상향!)
-                "leverage_min": (1, 60),
-                "leverage_max": (20, 110),
-                "max_loss_per_position": (5.0, 40.0),
+                "position_pct": (0.03, 0.08),        # [PATCH-14] 0.02→0.03 risk_limits 정렬
+                "watch_limit": (8, 15),
+                "max_open_symbols": (4, 10),
+                "leverage_min": (1, 5),               # [PATCH-14] 60→5 risk_limits 정렬
+                "leverage_max": (3, 12),              # [PATCH-14] 110→12 risk_limits 정렬
+                "max_loss_per_position": (0.5, 2.2),  # [PATCH-14] 40→2.2 risk_limits 정렬
                 "step_scale": 0.7,
                 "risk_bias_up": 0.80,
                 "risk_bias_down": 0.45,

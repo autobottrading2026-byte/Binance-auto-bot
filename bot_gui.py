@@ -74,15 +74,15 @@ class BotGUI:
     def __init__(self):
         self.settings_data = self._load_json(CONFIG_PATH, default={})
         defaults = {
-            "position_base_pct": 0.055,
-            "position_pct": 0.05,
+            "position_base_pct": 0.06,   # [PATCH-14] 0.055→0.06 config 정렬
+            "position_pct": 0.06,        # [PATCH-14] 0.05→0.06 config 정렬
             "top_n": 20,
             "volatility_min": 0.001,
             "momentum_min_long": 0.001,
             "momentum_min_short": -0.001,
             "auto_tune_enabled": True,
-            "leverage_min": 5,
-            "leverage_max": 25,
+            "leverage_min": 1,    # [PATCH-14] 5→1 config 정렬
+            "leverage_max": 10,   # [PATCH-14] 25→10 config 정렬
             "watch_limit": 10,
             "manual_symbols": ["BTCUSDT", "ETHUSDT"],
             "show_manual_panel": False,
@@ -109,7 +109,7 @@ class BotGUI:
             "maker_fee_pct": 0.0002,
             "taker_fee_pct": 0.0005,
             "limit_exit_offset_bps": 2.0,
-            "max_loss_per_position": 18.0,
+            "max_loss_per_position": 1.8,
             "max_open_symbols": 10,          # [추가] 동시 최대 오픈 심볼 수 기본값
             "enable_profit_exit_layer": True,
             "enable_partial_take_profit": True,
@@ -4649,8 +4649,8 @@ class BotGUI:
         update_guidance(base_var.get())
 
         lev_limit = 125 if self.env_mode == "TESTNET" else 150
-        lev_min = tk.IntVar(value=min(lev_limit, max(1, int(self.settings_data.get("leverage_min", 5)))))
-        lev_max = tk.IntVar(value=min(lev_limit, max(lev_min.get(), int(self.settings_data.get("leverage_max", 25)))))
+        lev_min = tk.IntVar(value=min(lev_limit, max(1, int(self.settings_data.get("leverage_min", 1)))))
+        lev_max = tk.IntVar(value=min(lev_limit, max(lev_min.get(), int(self.settings_data.get("leverage_max", 10)))))
         lev_label_text = tk.StringVar()
         lev_hint_text = tk.StringVar()
 
@@ -4837,8 +4837,8 @@ class BotGUI:
         filter_panel.pack(fill="x", pady=(0, 16))
 
         top_n_var = tk.IntVar(value=int(self.settings_data.get("top_n", 20)))
-        watch_limit_ui_var = tk.IntVar(value=int(self.settings_data.get("watch_limit", 20)))
-        max_open_ui_var = tk.IntVar(value=int(self.settings_data.get("max_open_symbols", 5)))
+        watch_limit_ui_var = tk.IntVar(value=int(self.settings_data.get("watch_limit", 10)))  # [PATCH-14] 20→10
+        max_open_ui_var = tk.IntVar(value=int(self.settings_data.get("max_open_symbols", 10)))  # [PATCH-14] 5→10
         vol_var = tk.DoubleVar(value=float(self.settings_data.get("volatility_min", 0.002)))
         mom_long_var = tk.DoubleVar(value=float(self.settings_data.get("momentum_min_long", 0.002)))
         mom_short_var = tk.DoubleVar(value=float(self.settings_data.get("momentum_min_short", -0.002)))
@@ -4895,7 +4895,7 @@ class BotGUI:
         watch_limit_var = watch_limit_ui_var   # 내부 호환
         max_open_var = max_open_ui_var         # 내부 호환
         auto_tune_cooldown_var = tk.IntVar(value=int(self.settings_data.get("auto_tune_cooldown_min", 10)))
-        max_loss_var = tk.DoubleVar(value=float(self.settings_data.get("max_loss_per_position", 18.0)))
+        max_loss_var = tk.DoubleVar(value=float(self.settings_data.get("max_loss_per_position", 1.8)))
 
         # watch_limit / max_open_symbols: auto-tune 조정 대상 제외됨 → 필드 숨김
         build_field(limits_panel, self._t("field_cooldown"), auto_tune_cooldown_var, width=10)
@@ -5183,10 +5183,10 @@ class BotGUI:
             mom_short_var.set(-0.002)
             auto_tune_var.set(True)
             on_auto_tune_toggle()
-            watch_limit_ui_var.set(20)
-            max_open_ui_var.set(5)
+            watch_limit_ui_var.set(10)   # [PATCH-14] 20→10
+            max_open_ui_var.set(10)      # [PATCH-14] 5→10
             auto_tune_cooldown_var.set(10)
-            max_loss_var.set(18.0)
+            max_loss_var.set(1.8)        # [PATCH-14] 18.0→1.8
             min_hold_var.set(300)
             time_stop_var.set(2700)
             change_mode("balanced", user=False)
@@ -7010,7 +7010,7 @@ class BotGUI:
             spike_guard_pct = 0.0
 
         # [PATCH-4] 포지션 크기 AutoTuner 범위 유효성 검증
-        _raw_pos_pct = float(self.settings_data.get("position_pct", 0.05))
+        _raw_pos_pct = float(self.settings_data.get("position_pct", 0.06))
         _tune_mode = str(self.settings_data.get("auto_tune_mode", "balanced"))
         _pos_bounds = {"aggressive": (0.03, 0.18), "balanced": (0.02, 0.12), "conservative": (0.02, 0.08)}
         _lo, _hi = _pos_bounds.get(_tune_mode, (0.02, 0.12))
@@ -7024,19 +7024,19 @@ class BotGUI:
         return EngineConfig(
             top_n=int(self.settings_data.get("top_n", 20)),
             position_pct=_raw_pos_pct,
-            leverage_min=int(self.settings_data.get("leverage_min", 5)),
-            leverage_max=int(self.settings_data.get("leverage_max", 25)),
+            leverage_min=int(self.settings_data.get("leverage_min", 1)),
+            leverage_max=int(self.settings_data.get("leverage_max", 10)),
             volatility_min=float(self.settings_data.get("volatility_min", 0.002)),
             momentum_min_long=float(self.settings_data.get("momentum_min_long", 0.002)),
             momentum_min_short=float(self.settings_data.get("momentum_min_short", -0.002)),
             momentum_min=float(self.settings_data.get("momentum_min_long", 0.002)),
             auto_tune_enabled=bool(self.settings_data.get("auto_tune_enabled", False)),
             auto_tune_mode=str(self.settings_data.get("auto_tune_mode", "balanced")),
-            total_risk_budget=float(self.settings_data.get("position_pct", 0.05)),
+            total_risk_budget=float(self.settings_data.get("position_pct", 0.06)),
             watch_limit=int(self.settings_data.get("watch_limit", 10)),
             max_open_symbols=int(self.settings_data.get("max_open_symbols", 10)),
             # [수정] 기본값 55.0 → 18.0: config.py·defaults와 통일. 55%는 레버리지 환경에서 치명적 손실 허용.
-            max_loss_per_position=float(self.settings_data.get("max_loss_per_position", 18.0)),
+            max_loss_per_position=float(self.settings_data.get("max_loss_per_position", 1.8)),
             spike_guard_enabled=bool(self.settings_data.get("spike_guard_enabled", True)),
             spike_guard_return_pct=spike_guard_pct,
             spike_guard_window=spike_guard_window,
@@ -7489,7 +7489,7 @@ class BotGUI:
         self._manual_slider_frame.pack(fill="x", padx=12, pady=(4, 2))  # 초기부터 표시
 
         # DoubleVar / IntVar — 설정 탭과 별개로 수동 패널 전용
-        _init_pct = round(float(self.settings_data.get("position_pct", 0.05)), 4)
+        _init_pct = round(float(self.settings_data.get("position_pct", 0.06)), 4)
         _init_pct = max(0.01, min(0.99, _init_pct))
         self.manual_pct_var = tk.DoubleVar(value=_init_pct)
 
@@ -7783,10 +7783,10 @@ class BotGUI:
         _pct_var2 = getattr(self, "manual_pct_var", None)
         _lev_var2 = getattr(self, "manual_lev_var2", None)
         try:
-            _pct_raw = float(_pct_var2.get()) if _pct_var2 else float(self.settings_data.get("position_pct", 0.05))
+            _pct_raw = float(_pct_var2.get()) if _pct_var2 else float(self.settings_data.get("position_pct", 0.06))
             _pct_raw = max(0.01, min(0.99, _pct_raw))
         except Exception:
-            _pct_raw = float(self.settings_data.get("position_pct", 0.05))
+            _pct_raw = float(self.settings_data.get("position_pct", 0.06))
         percent = round(_pct_raw * 100, 4)  # _manual_trade 내부는 % 단위
         try:
             _manual_leverage = max(1, int(_lev_var2.get())) if _lev_var2 else None
@@ -8098,7 +8098,7 @@ class BotGUI:
                 notional_amount = (self.last_account_balance * percent) / 100.0
             leverage_hint = None
             try:
-                leverage_hint = float(self.settings_data.get("leverage_min", 5))
+                leverage_hint = float(self.settings_data.get("leverage_min", 1))
             except (TypeError, ValueError):
                 leverage_hint = None
             if notional_amount:
@@ -8126,7 +8126,7 @@ class BotGUI:
         if not reduce_only:
             leverage_hint = None
             try:
-                leverage_hint = float(self.settings_data.get("leverage_min", 5))
+                leverage_hint = float(self.settings_data.get("leverage_min", 1))
             except (TypeError, ValueError):
                 leverage_hint = None
             if leverage_hint and leverage_hint > 0 and margin_amount:
@@ -9192,7 +9192,7 @@ class BotGUI:
                     value = None
         if value is None:
             try:
-                value = float(self.settings_data.get("position_pct", 0.05))
+                value = float(self.settings_data.get("position_pct", 0.06))
             except (TypeError, ValueError):
                 value = 0.0
         pct_text = f"{max(0.0, value) * 100:.2f}%"
@@ -9259,9 +9259,9 @@ class BotGUI:
             "momentum_min_long":  0.003,
             "momentum_min_short": -0.003,
             "volatility_min":     0.001,
-            "leverage_min":       5,
-            "leverage_max":       20,
-            "max_loss_per_position": 18.0,
+            "leverage_min":       1,   # [PATCH-14] 5→1
+            "leverage_max":       10,  # [PATCH-14] 20→10
+            "max_loss_per_position": 1.8,
         }
         _restored = []
         for _key, _default in _defaults_to_restore.items():
@@ -10843,9 +10843,9 @@ class BotGUI:
             "volatility_min":     fresh_settings.get("volatility_min", 0.001),
             "momentum_min_long":  fresh_settings.get("momentum_min_long", 0.001),
             "momentum_min_short": fresh_settings.get("momentum_min_short", -0.001),
-            "position_pct":       fresh_settings.get("position_pct", 0.05),
-            "leverage_min":       fresh_settings.get("leverage_min", 5),
-            "leverage_max":       fresh_settings.get("leverage_max", 25),
+            "position_pct":       fresh_settings.get("position_pct", 0.06),  # [PATCH-14] 0.05→0.06
+            "leverage_min":       fresh_settings.get("leverage_min", 1),
+            "leverage_max":       fresh_settings.get("leverage_max", 10),
         }
         label_map = {
             "volatility_min":     self._t("monitor_autotune_vol", "변동성 최소"),
