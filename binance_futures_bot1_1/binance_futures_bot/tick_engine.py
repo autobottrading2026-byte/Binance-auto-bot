@@ -2014,8 +2014,9 @@ class TickEngine:
         # (auto-tune 적용 후에도 사용자가 UI에서 지정한 값 아래로 내려가지 않도록)
         _user_wl = getattr(self, "_user_watch_limit", 0)
         _user_mo = getattr(self, "_user_max_open_symbols", 0)
-        _wl_floor = max(5, _user_wl) if _user_wl > 0 else 5
-        _mo_floor = max(3, _user_mo) if _user_mo > 0 else 3
+        # [PATCH-13c] config 기본값을 floor로 사용 (auto-tune이 줄이지 못하도록)
+        _wl_floor = max(int(getattr(self.config, "watch_limit", 10)), _user_wl) if _user_wl > 0 else int(getattr(self.config, "watch_limit", 10))
+        _mo_floor = max(int(getattr(self.config, "max_open_symbols", 10)), _user_mo) if _user_mo > 0 else int(getattr(self.config, "max_open_symbols", 10))
         self.config.watch_limit = max(_wl_floor, self.config.watch_limit)
         self.config.max_open_symbols = max(_mo_floor, self.config.max_open_symbols)
         self.config.leverage_min = max(1.0, min(self.config.leverage_min, 10.0))

@@ -364,7 +364,7 @@ class EngineConfig:
     symbol_reentry_cooldown_sec: int = 120       # 같은 심볼 청산 후 120초 대기
 
     # ── [PATCH-11] chop 레짐 동시 포지션 제한 ──
-    chop_max_open_symbols: int = 2               # chop에서 max_open_symbols 2로 제한
+    chop_max_open_symbols: int = 5               # [PATCH-13c] 2→5: chop에서도 분산 투자 허용
 
     # ── [PATCH-12] chop 레짐 진입 강화 ──
     chop_composite_min_score: float = 0.85       # chop에서 진입 임계값 상향 (일반 0.72 → 0.85)
