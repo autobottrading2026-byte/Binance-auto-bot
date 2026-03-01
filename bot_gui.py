@@ -3084,8 +3084,18 @@ class BotGUI:
             canvas.itemconfig(canvas.find_withtag("all")[0], width=event.width)
         canvas.bind("<Configure>", _on_env_canvas_configure)
         def _env_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", _env_mousewheel, add="+")
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+        _env_mw_id = canvas.bind_all("<MouseWheel>", _env_mousewheel, add="+")
+        def _env_cleanup_mousewheel(*_):
+            try:
+                canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+        canvas.bind("<Destroy>", _env_cleanup_mousewheel, add="+")
 
         # 이하 body에 pack (기존 frame → body로 변경)
         _is_ko = self.language == "ko"
