@@ -20,7 +20,7 @@ from collections import deque
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 # ── [PATCH-11] 버전 관리 ──
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_NAME = "Binance Auto Trading Bot"
 GITHUB_REPO = "autobottrading2026-byte/Binance-auto-bot"
 # ── 레퍼럴 코드 난독화 + 무결성 체크 ──

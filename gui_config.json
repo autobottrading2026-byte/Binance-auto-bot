@@ -4,7 +4,7 @@
   "fallback_api_key": "",
   "fallback_api_secret": "",
   "order_alerts": true,
-  "default_env_testnet": false,
+  "default_env_testnet": true,
   "autostart": false,
   "use_rotation_warmup": false,
   "spike_guard_pct": 7.0,
@@ -15,7 +15,7 @@
   "leverage_min": 1,
   "leverage_max": 10,
   "alerts": true,
-  "use_testnet": false,
+  "use_testnet": true,
   "position_base_pct": 0.12,
   "position_pct": 0.12,
   "top_n": 20,
@@ -74,11 +74,11 @@
   "progress_stop_drawdown_from_mfe": 0.07,
   "progress_stop_min_pnl_pct": 0.05,
   "progress_stop_action": "partial_or_full",
-  "ui_language": "ko",
+  "ui_language": "en",
   "risk_ack1": false,
   "expert_mode_enabled": false,
   "risk_ack2": false,
-  "consent_version": "v1.1-d8de2b46",
+  "consent_version": "",
   "limit_exit_offset_bps": 5.0,
   "default_card_modes": {
     "card0": "unrealized_total",
@@ -128,6 +128,5 @@
   "chop_max_open_symbols": 2,
   "chop_composite_min_score": 0.85,
   "chop_position_pct_mult": 0.5,
-  "binance_referral_code": "AUTO2026",
-  "referral_onboarding_shown": true
+  "binance_referral_code": "AUTO2026"
 }
