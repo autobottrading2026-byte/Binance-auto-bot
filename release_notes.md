@@ -3,11 +3,13 @@
 > ⚠️ **Windows SmartScreen 경고**: 처음 실행 시 "Windows가 PC를 보호했습니다" 메시지가 나올 수 있습니다.
 > `추가 정보` → `실행` 을 클릭하면 정상 실행됩니다. (코드 서명 미적용으로 인한 정상 경고)
 
-> 📄 **English instructions are included below.**
+> 📄 **For English users**: Scroll down for full English instructions, or download `BinanceAutoBot_EN.exe` which launches in English by default.
+>
+> 📄 **영문 사용자 안내**: 아래에 영문 설명이 포함되어 있으며, `BinanceAutoBot_EN.exe`는 영어가 기본 언어로 설정되어 있습니다.
 
 ---
 
-## 📦 다운로드
+## 📦 다운로드 / Downloads
 
 | 파일 | 설명 |
 |------|------|
