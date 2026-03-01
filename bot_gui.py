@@ -9209,7 +9209,12 @@ class BotGUI:
         )
         if not self._ask_yes_no("Kill Switch Reset", _msg):
             return
-        engine = getattr(self, "engine", None)
+        # [PATCH-13] self.engine는 존재하지 않음 → main.current_engine 참조
+        try:
+            from binance_futures_bot1_1 import main as _eng_main
+            engine = getattr(_eng_main, "current_engine", None)
+        except Exception:
+            engine = None
         if engine is not None:
             engine.kill_switch_triggered = False
             engine.kill_switch_release_ts = 0.0

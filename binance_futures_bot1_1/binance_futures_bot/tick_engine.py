@@ -77,11 +77,11 @@ class TickEngine:
         "UNKNOWN",
     }
     HARD_CAPS = {
-        # [PATCH-13] config.py 기본값과 정렬된 안전 범위
-        "position_pct": (0.03, 0.10),       # 3~10% (config 기본 6%)
-        "leverage_min": (1, 10),             # 1~10x
-        "leverage_max": (2, 15),             # 2~15x (config 기본 10x)
-        "max_loss_per_position": (0.5, 3.0), # 0.5~3.0% (config 기본 1.8%)
+        # [PATCH-13c] config.py 기본값 기준 ±50% 범위로 엄격 제한
+        "position_pct": (0.03, 0.08),        # 3~8% (config 기본 6%, 최대 8%)
+        "leverage_min": (1, 5),              # 1~5x
+        "leverage_max": (2, 12),             # 2~12x (config 기본 10x)
+        "max_loss_per_position": (0.5, 2.2), # 0.5~2.2% (config 기본 1.8%, 최대 2.2%)
         "watch_limit": (1, 30),
         "max_open_symbols": (1, 20),
     }
@@ -813,6 +813,18 @@ class TickEngine:
                     loaded["watch_limit"] = _wl_restore
                 if _mo_restore > 0:
                     loaded["max_open_symbols"] = _mo_restore
+                # [PATCH-13c] 로드된 파라미터를 config 기본값 범위로 클램핑
+                # Auto-Tuner state에 저장된 과거 잘못된 값이 config 변경을 무시하지 않도록
+                _cfg_caps = {
+                    "position_pct": (0.03, self.config.position_pct * 1.5),  # config 기본값의 150%까지만
+                    "max_loss_per_position": (0.5, self.config.max_loss_per_position * 1.2),  # config 기본값의 120%까지만
+                }
+                for _cap_key, (_cap_lo, _cap_hi) in _cfg_caps.items():
+                    if _cap_key in loaded:
+                        _old_val = loaded[_cap_key]
+                        loaded[_cap_key] = max(_cap_lo, min(_cap_hi, float(loaded[_cap_key])))
+                        if _old_val != loaded[_cap_key]:
+                            logger.info("[LOAD_CLAMP] %s: %.4f → %.4f (config cap)", _cap_key, _old_val, loaded[_cap_key])
                 tuner.current = loaded
         else:
             current = data.get("current") or {}
@@ -1980,7 +1992,7 @@ class TickEngine:
         # watch_limit / max_open_symbols는 auto-tune 적용 무시 → 사용자 설정값 유지
         # (심볼 수 감소는 진입 기회만 줄이고 리스크 감소 효과 없음)
         if "position_pct" in params:
-            raw_pct = max(0.03, min(0.10, float(params["position_pct"])))  # [PATCH-13] 상한 10%: config 기본 6%
+            raw_pct = max(0.03, min(0.08, float(params["position_pct"])))  # [PATCH-13c] 상한 8%: config 기본 6%
             position_pct = self._assign_rate_limited("position_pct", raw_pct)
             self.total_risk_budget = position_pct
             self.config.total_risk_budget = position_pct

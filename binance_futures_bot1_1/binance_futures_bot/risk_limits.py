@@ -18,11 +18,12 @@ class ParamLimit:
 
 DEFAULT_LIMITS = {
     # [PATCH-13] 안전 범위 config.py 기본값과 정렬
-    "position_pct": ParamLimit("position_pct", (0.03, 0.08), 0.005),       # 3~8% (config 기본 6%)
-    "total_risk_budget": ParamLimit("total_risk_budget", (0.03, 0.10), 0.003),
+    # [PATCH-13c] config 기본값 ±30% 범위로 엄격 제한
+    "position_pct": ParamLimit("position_pct", (0.03, 0.08), 0.003),       # 3~8% (config 기본 6%)
+    "total_risk_budget": ParamLimit("total_risk_budget", (0.03, 0.08), 0.003),
     "leverage_min": ParamLimit("leverage_min", (1.0, 5.0), 0.5),           # 1~5x
-    "leverage_max": ParamLimit("leverage_max", (3.0, 15.0), 1.0),          # 3~15x (config 기본 10x)
-    "max_loss_per_position": ParamLimit("max_loss_per_position", (0.5, 2.5), 0.2),  # 0.5~2.5% (config 기본 1.8%)
+    "leverage_max": ParamLimit("leverage_max", (3.0, 12.0), 1.0),          # 3~12x (config 기본 10x)
+    "max_loss_per_position": ParamLimit("max_loss_per_position", (0.5, 2.2), 0.1),  # 0.5~2.2% (config 기본 1.8%)
     "watch_limit": ParamLimit("watch_limit", (3, 20), 1.0),
     "max_open_symbols": ParamLimit("max_open_symbols", (2, 12), 0.5),
     "momentum_min_long": ParamLimit("momentum_min_long", (-0.006, 0.006), 0.0008),
