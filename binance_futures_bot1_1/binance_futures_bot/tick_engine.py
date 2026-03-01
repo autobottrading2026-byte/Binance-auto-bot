@@ -1572,27 +1572,53 @@ class TickEngine:
 
     # ── Kelly 사이징 ─────────────────────────────────────────────────────
     def _kelly_position_pct(self) -> float:
-        """최근 거래 결과 기반 Quarter-Kelly 포지션 비율."""
+        """최근 거래 결과 기반 Quarter-Kelly 포지션 비율 + 드로다운 보호."""
+        base_pct = self.config.position_pct
         if not bool(getattr(self.config, "kelly_sizing_enabled", True)):
-            return self.config.position_pct
+            return base_pct
         min_samples = int(getattr(self.config, "kelly_min_samples", 10))
         dq = self._pnl_outcomes
         if len(dq) < min_samples:
-            return self.config.position_pct
+            # [PATCH-13] 표본 부족 시에도 연속 손실 보호 적용
+            return self._apply_drawdown_guard(base_pct)
         wins = [roi for _, roi in dq if roi > 0]
         losses = [abs(roi) for _, roi in dq if roi < 0]
         if not wins or not losses:
-            return self.config.position_pct
+            return self._apply_drawdown_guard(base_pct)
         W = len(wins) / len(dq)
         avg_win = sum(wins) / len(wins)
         avg_loss = sum(losses) / len(losses)
         if avg_loss == 0:
-            return self.config.position_pct
+            return self._apply_drawdown_guard(base_pct)
         R = avg_win / avg_loss
         kelly = W - (1.0 - W) / R
+        # [PATCH-13] Kelly < 0이면 엣지 없음 → 최소값으로 제한
+        if kelly <= 0:
+            return max(0.005, base_pct * 0.3)
         fraction = float(getattr(self.config, "kelly_fraction", 0.25))
-        quarter_kelly = max(0.005, min(kelly * fraction, 0.15))
-        return quarter_kelly
+        quarter_kelly = max(0.005, min(kelly * fraction, base_pct))
+        return self._apply_drawdown_guard(quarter_kelly)
+
+    def _apply_drawdown_guard(self, pct: float) -> float:
+        """[PATCH-13] 연속 손실 시 포지션 크기 점진적 축소."""
+        dq = self._pnl_outcomes
+        if not dq:
+            return pct
+        # 최근 거래에서 연속 손실 횟수 계산
+        consecutive_losses = 0
+        for _, roi in reversed(dq):
+            if roi < 0:
+                consecutive_losses += 1
+            else:
+                break
+        # 연속 3회 이상 손실 시 점진적 축소 (3→70%, 4→50%, 5+→35%)
+        if consecutive_losses >= 5:
+            return max(0.005, pct * 0.35)
+        elif consecutive_losses >= 4:
+            return max(0.005, pct * 0.50)
+        elif consecutive_losses >= 3:
+            return max(0.005, pct * 0.70)
+        return pct
 
     # ── 펀딩 레이트 캐시 ────────────────────────────────────────────────
     async def _get_funding_rate(self, symbol: str) -> float:
@@ -1643,8 +1669,9 @@ class TickEngine:
         slip_bps = float(getattr(self.config, "tca_slippage_estimate_bps", 0.0) or 0.0)
         tca = (spread_bps + slip_bps) / 10000.0
 
-        # [PATCH-8] 항상 taker×2 보수적 비용 계산 (maker 체결 보장 불가)
-        fee_cost = taker * 2
+        # [PATCH-13] 진입=taker, 청산=maker 비대칭 비용 (maker-first exit 전략 반영)
+        # 기존 taker×2는 과도하게 보수적 → 좋은 진입 기회도 차단하는 문제
+        fee_cost = taker + maker
         return fee_cost + (tca * 2) + mark_gap + rv_penalty
 
     def _edge_covers_cost(self, decision: SignalDecision, snap: SymbolSnapshot) -> bool:
@@ -2651,18 +2678,30 @@ class TickEngine:
                         price_stop_hit = True
             if price_stop_hit:
                 continue
-            # [PATCH-10] 단일 거래 손실 하드캡: -2.2% ROI 초과 시 즉시 강제 청산 (min_hold 무시)
+            # [PATCH-13] 단일 거래 손실 하드캡 (min_hold 고려 + 2단계 캡)
             _hard_loss_cap = float(getattr(self.config, "max_single_trade_loss_pct", 0.0) or 0.0)
             if _hard_loss_cap > 0:
                 roi_percent = self._position_roi_percent(pos)
-                if roi_percent <= -_hard_loss_cap:
-                    logger.warning("[HARD_LOSS_CAP] %s ROI=%.2f%% < -%.2f%% → forced close", symbol, roi_percent, _hard_loss_cap)
+                _critical_cap = _hard_loss_cap * 1.5  # 극단 손실 (캡의 150%)
+                if roi_percent <= -_critical_cap:
+                    # 극단 손실: min_hold 무시, 즉시 강제 청산
+                    logger.warning("[HARD_LOSS_CAP_CRITICAL] %s ROI=%.2f%% < -%.2f%% → forced close (min_hold bypass)", symbol, roi_percent, _critical_cap)
                     await self._force_close_position(
                         symbol, position_amt, roi_percent,
-                        trigger=self._ko(f"손실캡 -{_hard_loss_cap}%", f"hard_loss_cap_{_hard_loss_cap}%"),
+                        trigger=self._ko(f"극단 손실캡 -{_critical_cap:.1f}%", f"critical_loss_cap_{_critical_cap:.1f}%"),
                         exit_reason=self.EXIT_REASON_STOP_LOSS, urgent=True,
                     )
                     continue
+                elif roi_percent <= -_hard_loss_cap:
+                    # 일반 하드캡: min_hold 경과 후에만 청산 (노이즈 손절 방지)
+                    if snapshot and self._minimum_hold_elapsed(snapshot):
+                        logger.warning("[HARD_LOSS_CAP] %s ROI=%.2f%% < -%.2f%% → forced close", symbol, roi_percent, _hard_loss_cap)
+                        await self._force_close_position(
+                            symbol, position_amt, roi_percent,
+                            trigger=self._ko(f"손실캡 -{_hard_loss_cap}%", f"hard_loss_cap_{_hard_loss_cap}%"),
+                            exit_reason=self.EXIT_REASON_STOP_LOSS, urgent=True,
+                        )
+                        continue
             if loss_threshold_pct > 0:
                 roi_percent = self._position_roi_percent(pos)
                 if roi_percent <= -loss_threshold_pct and self._minimum_hold_elapsed(snapshot):
@@ -3856,7 +3895,8 @@ class TickEngine:
             # 거래량 서지 점수 (단기 틱 속도 기반)
             volume_score = self._volume_surge_score(snap.symbol)
             volume_score = min(volume_score / 1.5, 2.0)  # 1.5배 서지면 만점
-            volume_score = max(volume_score, 0.5)  # 거래 부족 시 최솟값 0.5 (알트코인 패널티 방지)
+            # [PATCH-13] 볼륨 플로어 0.5 제거 → 0.0 (거래량 없는 심볼에 허위 점수 부여 방지)
+            # 거래량이 실제로 없으면 composite 점수가 자연스럽게 낮아져 진입 차단됨
             # MTF 정렬 점수 (0.0~1.0)
             mtf_score = self._mtf_alignment_score(snap.symbol, direction)
             # 가중 합산
@@ -4230,10 +4270,17 @@ class TickEngine:
                     notional_by_risk = qty_by_risk * snap.price
                     if notional_by_risk > 0:
                         desired_notional = min(desired_notional, notional_by_risk)
-                        desired_notional = max(desired_notional, min_notional)
+                        # [PATCH-13] min_notional이 ATR 사이징을 무효화하지 않도록
+                        # ATR 사이징 결과가 min_notional 미만이면 진입 차단 (리스크 초과 방지)
+                        if notional_by_risk < min_notional:
+                            logger.info("ENTRY_BLOCKED_ATR_SIZE %s atr_notional=%.2f < min_notional=%.2f → skip (risk too large)", snap.symbol, notional_by_risk, min_notional)
+                            self._increment_flow("blocked_size")
+                            self._record_entry_block("blocked_size")
+                            return
 
-        # [PATCH-6b] ATR 사이징 조건 불충족 시에도 min_notional 보장
-        desired_notional = max(desired_notional, min_notional)
+        # [PATCH-13] min_notional 보장 (ATR 사이징 미사용 시만)
+        if not bool(getattr(self.config, "atr_risk_sizing_enabled", False)):
+            desired_notional = max(desired_notional, min_notional)
 
         # 증거금 최소값 검사: desired_notional / leverage < min_margin_usdt 면 차단
         _min_margin = float(getattr(self.config, "min_margin_usdt", 1.0))

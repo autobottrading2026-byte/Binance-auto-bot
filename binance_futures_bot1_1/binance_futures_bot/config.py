@@ -53,7 +53,7 @@ class EngineConfig:
     # - 자산 < 5 USDT: 15-20% (수익 확보 위해)
     # - 자산 5-20 USDT: 10-15%
     # - 자산 > 20 USDT: 5-10%
-    position_pct: float = 0.12  # [PATCH-11] 12% — 수수료 비율 절감 목적
+    position_pct: float = 0.06  # [PATCH-13] 12%→6% — 리스크 축소 + Kelly 드로다운 가드와 연동
     
     # ═══════════════════════════════════════════════════════════
     # 🔧 수정 #1: 레버리지 대폭 하향 (40x → 10-15x)
@@ -154,8 +154,8 @@ class EngineConfig:
     # - TP 도달 가능성 증가
     # - 평균 수익 +2.18% → +3.5% 예상
     enable_take_profit: bool = True         # False → True
-    tp_r_multiple_1: float = 0.6            # 0.8 → 0.6 (손절의 60%에서 50% 익절)
-    tp_r_multiple_2: float = 1.0            # 1.2 → 1.0 (손절의 100%에서 전량 익절)
+    tp_r_multiple_1: float = 1.5            # [PATCH-13] 0.6→1.5 (손절의 150%에서 50% 익절, 손익비 최소 1.5:1)
+    tp_r_multiple_2: float = 2.5            # [PATCH-13] 1.0→2.5 (손절의 250%에서 전량 익절, 손익비 2.5:1)
     partial_tp_ratio: float = 0.5
     break_even_after_partial: bool = True
     tp_min_roi_pct: float = 0.003           # 최소 ROI 0.3%
@@ -229,9 +229,9 @@ class EngineConfig:
 
     partial_tp_levels: list = field(
         default_factory=lambda: [
-            {"r": 0.5, "close_frac": 0.30},   # [PATCH-10] TP1: 0.5R에서 30% (빠른 수익 확정)
-            {"r": 1.0, "close_frac": 0.30},   # [PATCH-10] TP2: 1.0R에서 30% (1:1 손익비 달성)
-            {"r": 1.8, "close_frac": 0.40},   # [PATCH-10] TP3: 1.8R에서 40% (나머지 트레일링)
+            {"r": 1.0, "close_frac": 0.30},   # [PATCH-13] TP1: 1.0R에서 30% (1:1 손익비 확보)
+            {"r": 1.5, "close_frac": 0.30},   # [PATCH-13] TP2: 1.5R에서 30% (손익비 1.5:1)
+            {"r": 2.5, "close_frac": 0.40},   # [PATCH-13] TP3: 2.5R에서 40% (나머지 트레일링)
         ]
     )
     maker_entry_use_taker: bool = True   # [PATCH-9] 진입은 taker(타이밍), 청산은 maker(비용) 분리
@@ -268,7 +268,7 @@ class EngineConfig:
     # ═══════════════════════════════════════════════════════════
     # 🔧 수정 #10: 복합 시그널 최소 스코어 상향 (진입 조건 강화)
     # ═══════════════════════════════════════════════════════════
-    composite_min_score: float = 0.72       # [PATCH-9] 0.80→0.72: 진입 빈도 확보 (표본 수 증가)
+    composite_min_score: float = 0.80       # [PATCH-13] 0.72→0.80: 진입 품질 강화 (볼륨 플로어 제거와 연동)
     
     chop_momentum_multiplier: float = 1.2
     overheat_min_multiplier: float = 2.0
