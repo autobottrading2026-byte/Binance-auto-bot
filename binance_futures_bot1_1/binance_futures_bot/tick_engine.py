@@ -77,19 +77,21 @@ class TickEngine:
         "UNKNOWN",
     }
     HARD_CAPS = {
-        "position_pct": (0.03, 0.20),  # 하한 3%: 소잔고 진입 보장
-        "leverage_min": (1, 150),
-        "leverage_max": (1, 150),
-        "max_loss_per_position": (5.0, 60.0),
-        "watch_limit": (1, 50),
-        "max_open_symbols": (1, 50),
+        # [PATCH-13] config.py 기본값과 정렬된 안전 범위
+        "position_pct": (0.03, 0.10),       # 3~10% (config 기본 6%)
+        "leverage_min": (1, 10),             # 1~10x
+        "leverage_max": (2, 15),             # 2~15x (config 기본 10x)
+        "max_loss_per_position": (0.5, 3.0), # 0.5~3.0% (config 기본 1.8%)
+        "watch_limit": (1, 30),
+        "max_open_symbols": (1, 20),
     }
     # D: non-expert hard cap for leverage_max
     LEVERAGE_MAX_NON_EXPERT: int = 50
     ROC_LIMITS = {
-        "position_pct": 0.01,  # max ±1%p per update
-        "leverage_min": 5,
-        "leverage_max": 10,
+        # [PATCH-13] ROC 제한 강화 (급격한 변경 방지)
+        "position_pct": 0.005,  # max ±0.5%p per update (기존 1%)
+        "leverage_min": 2,      # max ±2x per update (기존 5)
+        "leverage_max": 3,      # max ±3x per update (기존 10)
         "max_loss_per_position": 1.0,
     }
     TUNABLE_PARAM_KEYS = (
@@ -1978,7 +1980,7 @@ class TickEngine:
         # watch_limit / max_open_symbols는 auto-tune 적용 무시 → 사용자 설정값 유지
         # (심볼 수 감소는 진입 기회만 줄이고 리스크 감소 효과 없음)
         if "position_pct" in params:
-            raw_pct = max(0.03, min(0.20, float(params["position_pct"])))  # 하한 0.03 (3%): 소잔고 진입 보장
+            raw_pct = max(0.03, min(0.10, float(params["position_pct"])))  # [PATCH-13] 상한 10%: config 기본 6%
             position_pct = self._assign_rate_limited("position_pct", raw_pct)
             self.total_risk_budget = position_pct
             self.config.total_risk_budget = position_pct
