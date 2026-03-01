@@ -1,171 +1,137 @@
-## v1.1.0 - 첫 공식 배포
+# 🤖 Binance Auto Trading Bot v1.1.1
 
-바이낸스 선물(USDT-M) 자동매매 봇의 첫 공식 릴리즈입니다.
+> ⚠️ **Windows SmartScreen 경고**: 처음 실행 시 "Windows가 PC를 보호했습니다" 메시지가 나올 수 있습니다.
+> `추가 정보` → `실행` 을 클릭하면 정상 실행됩니다. (코드 서명 미적용으로 인한 정상 경고)
 
-### 주요 기능
-
-- **복합 시그널 기반 자동 진입/청산** — 모멘텀(50%), 거래량(30%), MTF EMA(20%) 복합 스코어링
-- **다층 청산 시스템** — 손절, 부분익절, ATR 트레일링, 브레이크이븐, 시그널 감쇠, 타임스탑
-- **ATR 기반 포지션 사이징** + Kelly Criterion 적용
-- **레짐 감지** — trend_up / trend_down / chop 자동 판별 및 방향 바이어스
-- **Maker 우선 청산** — 수수료 절감을 위한 지정가 청산 (5bps 오프셋, 4회 시도)
-- **심볼별 재진입 쿨다운** — 동일 심볼 연속 진입 방지 (120초)
-- **Chop 레짐 포지션 제한** — 횡보장에서 최대 2개 심볼로 리스크 관리
-- **Auto Tuner** — 레짐별 파라미터 자동 최적화
-- **다크 테마 GUI** — 한국어/영어 지원, 실시간 모니터링
-- **자동 업데이트 확인** — 새 버전 출시 시 알림
-
-### 바이낸스 API Key 발급 방법
-
-#### 📌 테스트넷 (모의거래)
-
-1. https://testnet.binancefuture.com 접속
-2. GitHub 계정으로 로그인
-3. 하단 **"API Key"** 메뉴 클릭
-4. **"Generate HMAC_SHA256 Key"** 클릭
-5. API Key와 Secret Key 복사 후 환경변수에 등록
-6. ⚠️ 테스트넷 키는 주기적으로 만료되므로 재발급 필요할 수 있음
-
-#### 📌 실거래 (메인넷)
-
-1. https://www.binance.com 로그인
-2. 우측 상단 프로필 아이콘 → **"API 관리"** 클릭
-3. API Key 라벨 입력 (예: `AutoBot`) → **"API 키 생성"** 클릭
-4. 이메일/2FA 인증 완료
-5. API Key와 Secret Key 복사 후 환경변수에 등록
-6. **API 제한 설정 (필수):**
-   - ✅ **선물 거래 활성화** — "선물" 체크
-   - ✅ **IP 접근 제한** — 본인 IP만 허용 권장
-   - ❌ **출금 비활성화** — 출금 권한은 반드시 OFF
-7. ⚠️ Secret Key는 생성 시 한 번만 표시되므로 반드시 즉시 복사
-
-### 설치 방법
-
-1. `BinanceAutoBot.exe` 다운로드
-
-2. Windows 환경변수에 API Key 등록 (프로그램 내에서 직접 키를 입력하지 않으므로 보안 안전)
-
-   **환경변수 설정 방법:**
-   1. `Win + S` 키를 눌러 검색창 열기
-   2. **"환경 변수"** 검색 → **"시스템 환경 변수 편집"** 클릭
-   3. **"환경 변수(N)"** 버튼 클릭
-   4. **사용자 변수** 영역에서 **"새로 만들기(N)"** 클릭
-   5. 아래 변수를 각각 추가:
-
-   | 변수 이름 | 변수 값 | 용도 |
-   |-----------|---------|------|
-   | `TESTNET_API_KEY` | 테스트넷 API Key | 모의거래 |
-   | `TESTNET_API_SECRET` | 테스트넷 API Secret | 모의거래 |
-   | `BINANCE_API_KEY` | 실거래 API Key | 실거래 |
-   | `BINANCE_API_SECRET` | 실거래 API Secret | 실거래 |
-
-   6. **확인** 눌러 모두 저장
-   7. ⚠️ 이미 프로그램이 실행 중이라면 **재시작** 필요
-
-3. 실행 후 설정 탭에서 환경변수 상태 확인 (설정됨 / 미설정 표시)
-4. 테스트넷으로 먼저 테스트 권장
-
-### ⚠️ 최초 실행 시 Windows SmartScreen 안내
-
-처음 실행할 때 **"Windows의 PC 보호"** 경고가 나타날 수 있습니다. 이는 코드 서명이 없는 새 프로그램에 대한 기본 보안 경고이며, 한 번만 허용하면 이후에는 나타나지 않습니다.
-
-1. **"추가 정보"** 클릭
-2. **"실행"** 버튼 클릭
-
-### 요구사항
-
-- Windows 10/11
-- 바이낸스 선물 계정 + API Key (선물 거래 권한 필요)
-
-### 주의사항
-
-- 투자 손실의 책임은 사용자에게 있습니다
-- 반드시 테스트넷에서 충분히 테스트 후 실거래 전환하세요
-- 소액으로 시작하는 것을 권장합니다
+> 📄 **English instructions are included below.**
 
 ---
 
-## v1.1.0 - First Official Release
+## 📦 다운로드
 
-First official release of the Binance Futures (USDT-M) auto trading bot.
+| 파일 | 설명 |
+|------|------|
+| `BinanceAutoBot_KR.exe` | 한국어 기본 실행 파일 |
+| `BinanceAutoBot_EN.exe` | English default executable |
 
-### Key Features
+---
 
-- **Composite Signal-based Auto Entry/Exit** — Momentum(50%), Volume(30%), MTF EMA(20%) scoring
-- **Multi-layer Exit System** — SL, partial TP, ATR trailing, breakeven, signal decay, time stop
-- **ATR-based Position Sizing** + Kelly Criterion
-- **Regime Detection** — Auto-classify trend_up / trend_down / chop with directional bias
-- **Maker-first Exit** — Limit order exit for fee reduction (5bps offset, 4 attempts)
-- **Per-symbol Reentry Cooldown** — Prevents consecutive entries on the same symbol (120s)
-- **Chop Regime Position Limit** — Max 2 symbols during sideways markets
-- **Auto Tuner** — Automatic parameter optimization per regime
-- **Dark Theme GUI** — Korean/English support, real-time monitoring
-- **Auto Update Check** — Notification when a new version is available
+## 🔧 v1.1.1 변경사항
+
+### 횡보장(Chop) 방어 강화
+- 횡보 레짐 진입 임계값 상향 (0.72 → 0.85)
+- 횡보 구간 포지션 사이즈 50% 자동 축소
+- 횡보 시 최대 동시 오픈 심볼 2개 제한
+
+### 레퍼럴 코드 보안
+- 레퍼럴 코드 읽기 전용 고정 (변조 방지)
+- Base64 난독화 + SHA-256 무결성 검증
+- 변조 감지 시 비공식 버전 경고 다이얼로그
+
+### 프리미엄 구독 결제
+- 월간($9.99) / 연간($99, 17% 할인) 구독 버튼 추가
+- Lemon Squeezy 결제 연동
+
+### 환경설정 UX 개선
+- 환경변수 설정 방법 단계별 가이드 추가 (최상단 배치)
+- 변수명 테이블 (색상 구분, 시인성 강화)
+- 필수 동의 완료 후 환경변수 미설정 시 자동 안내
+- 하단 DEFAULT/SAVE 버튼 잘림 문제 수정 (스크롤 구조 개선)
+
+---
+
+## 🔑 환경변수 설정 (최초 1회)
+
+API 키는 프로그램 안에서 입력하지 않습니다. Windows 환경 변수에 등록해 주세요.
+
+### 설정 순서
+1. Windows 검색 → `환경 변수` → **시스템 환경 변수 편집**
+2. **환경 변수(N)...** 버튼 클릭
+3. **사용자 변수** → **새로 만들기(N)...**
+4. 아래 4개 변수를 하나씩 추가
+
+| 환경 | 변수명 | 값 |
+|------|--------|-----|
+| 테스트넷 | `TESTNET_API_KEY` | 발급받은 테스트넷 API Key |
+| 테스트넷 | `TESTNET_API_SECRET` | 발급받은 테스트넷 Secret Key |
+| 실거래 | `BINANCE_API_KEY` | 발급받은 실거래 API Key |
+| 실거래 | `BINANCE_API_SECRET` | 발급받은 실거래 Secret Key |
+
+5. 모든 창에서 **확인** 클릭
+6. 프로그램 **종료 후 다시 실행**
+
+### 바이낸스 API 키 발급
+- **테스트넷**: https://testnet.binancefuture.com → API Management → Create API
+- **실거래**: https://www.binance.com → API Management → Create API
+  - ✅ Enable Futures 체크 필수
+  - ✅ IP 제한 권장 (보안)
+
+---
+
+---
+
+# 🤖 Binance Auto Trading Bot v1.1.1 — English
+
+> ⚠️ **Windows SmartScreen Warning**: On first launch, you may see "Windows protected your PC".
+> Click `More info` → `Run anyway`. This is a normal warning due to unsigned code.
+
+---
+
+## 📦 Downloads
+
+| File | Description |
+|------|-------------|
+| `BinanceAutoBot_KR.exe` | Korean default executable |
+| `BinanceAutoBot_EN.exe` | English default executable |
+
+---
+
+## 🔧 v1.1.1 Changes
+
+### Chop Regime Defense
+- Entry threshold raised (0.72 → 0.85) during sideways markets
+- Position size auto-reduced by 50% in chop regime
+- Max 2 simultaneous open symbols during chop
+
+### Referral Code Security
+- Referral code set to read-only (tamper-proof)
+- Base64 obfuscation + SHA-256 integrity check
+- Warning dialog on tamper detection
+
+### Premium Subscription
+- Monthly ($9.99) / Yearly ($99, 17% off) subscription buttons
+- Lemon Squeezy payment integration
+
+### Settings UX Improvements
+- Step-by-step environment variable guide (top of settings)
+- Variable name table with color-coded columns
+- Auto-redirect to settings after consent if env vars missing
+- Fixed bottom buttons being cut off (scrollable layout)
+
+---
+
+## 🔑 Environment Variables (One-time Setup)
+
+API keys are NOT entered inside the program. Register them as Windows environment variables.
+
+### Steps
+1. Windows Search → `Environment Variables` → **Edit system environment variables**
+2. Click **Environment Variables...** button
+3. Under **User variables** → click **New...**
+4. Add these 4 variables one by one:
+
+| Env | Variable Name | Value |
+|-----|--------------|-------|
+| Testnet | `TESTNET_API_KEY` | Your Testnet API Key |
+| Testnet | `TESTNET_API_SECRET` | Your Testnet Secret Key |
+| Live | `BINANCE_API_KEY` | Your Live API Key |
+| Live | `BINANCE_API_SECRET` | Your Live Secret Key |
+
+5. Click **OK** on all dialogs
+6. **Close and restart** the program
 
 ### Binance API Key Guide
-
-#### 📌 Testnet (Paper Trading)
-
-1. Go to https://testnet.binancefuture.com
-2. Log in with your GitHub account
-3. Click **"API Key"** at the bottom
-4. Click **"Generate HMAC_SHA256 Key"**
-5. Copy API Key and Secret Key, then register as environment variables
-6. ⚠️ Testnet keys may expire periodically and require regeneration
-
-#### 📌 Live Trading (Mainnet)
-
-1. Log in to https://www.binance.com
-2. Click profile icon (top right) → **"API Management"**
-3. Enter API Key label (e.g., `AutoBot`) → Click **"Create API"**
-4. Complete email/2FA verification
-5. Copy API Key and Secret Key, then register as environment variables
-6. **API Restriction Settings (Required):**
-   - ✅ **Enable Futures** — Check "Futures"
-   - ✅ **Restrict IP Access** — Allow only your IP (recommended)
-   - ❌ **Disable Withdrawal** — Withdrawal permission must be OFF
-7. ⚠️ Secret Key is shown only once at creation — copy it immediately
-
-### Installation
-
-1. Download `BinanceAutoBot.exe`
-
-2. Register your API Keys as Windows environment variables (keys are never entered directly in the program for security)
-
-   **How to set environment variables:**
-   1. Press `Win + S` to open search
-   2. Search **"environment variables"** → Click **"Edit the system environment variables"**
-   3. Click **"Environment Variables"** button
-   4. Under **User variables**, click **"New"**
-   5. Add the following variables:
-
-   | Variable Name | Variable Value | Purpose |
-   |---------------|---------------|---------|
-   | `TESTNET_API_KEY` | Testnet API Key | Paper trading |
-   | `TESTNET_API_SECRET` | Testnet API Secret | Paper trading |
-   | `BINANCE_API_KEY` | Live API Key | Live trading |
-   | `BINANCE_API_SECRET` | Live API Secret | Live trading |
-
-   6. Click **OK** to save all
-   7. ⚠️ If the program is already running, **restart** is required
-
-3. Run and verify environment variable status in the Settings tab (Set / Not set indicator)
-4. Testing on Testnet first is recommended
-
-### ⚠️ Windows SmartScreen Notice
-
-A **"Windows protected your PC"** warning may appear on first run. This is a standard security warning for new unsigned programs. You only need to allow it once.
-
-1. Click **"More info"**
-2. Click **"Run anyway"**
-
-### Requirements
-
-- Windows 10/11
-- Binance Futures account + API Key (Futures trading permission required)
-
-### Disclaimer
-
-- Users are solely responsible for any trading losses
-- Always test thoroughly on Testnet before switching to live trading
-- Starting with a small amount is recommended
+- **Testnet**: https://testnet.binancefuture.com → API Management → Create API
+- **Live**: https://www.binance.com → API Management → Create API
+  - ✅ Enable Futures (required)
+  - ✅ IP restriction recommended (security)
