@@ -1905,7 +1905,7 @@ class TickEngine:
             self._notify("WARN", "Order failure circuit triggered: pausing entries 10m")
 
     async def _run_auto_tuner_cycle(self, snapshots: List[SymbolSnapshot]):
-        if not self.auto_tuner or not getattr(self.config, "auto_tune_enabled", True):
+        if not self.auto_tuner or not getattr(self.config, "auto_tune_enabled", False):  # [PATCH-16] 기본값 False
             return
         returns = self._collect_returns(lookback_sec=300)
         rv30 = self._compute_rv30()
@@ -2933,8 +2933,9 @@ class TickEngine:
         return (time.time() - float(opened)) >= min_hold
 
     async def _enforce_time_and_signal_decay(self, positions: Optional[List[dict]] = None, symbol_snaps: Optional[List[SymbolSnapshot]] = None):
-        enable_time = bool(getattr(self.config, "time_stop_seconds", 0))
-        enable_decay = bool(getattr(self.config, "signal_decay_threshold", 0))
+        # [PATCH-16] 개별 enable 플래그 우선 체크
+        enable_time = bool(getattr(self.config, "enable_time_stop", False)) and bool(getattr(self.config, "time_stop_seconds", 0))
+        enable_decay = bool(getattr(self.config, "enable_signal_decay_exit", False)) and bool(getattr(self.config, "signal_decay_threshold", 0))
         if not enable_time and not enable_decay:
             return
         if positions is None:
@@ -3960,8 +3961,8 @@ class TickEngine:
                     else:
                         composite += float(getattr(self.config, "regime_long_penalty_trend_down", -0.10))
             min_composite = float(getattr(self.config, "composite_min_score", 0.80))  # [PATCH-14] 0.72→0.80 config 정렬
-            # [PATCH-12] chop 레짐에서 진입 임계값 상향
-            if regime == "chop":
+            # [PATCH-16] auto_tune 꺼져있으면 regime 기반 조정 무시 (기본값 chop 고정이므로)
+            if regime == "chop" and getattr(self.config, "auto_tune_enabled", False):
                 min_composite = float(getattr(self.config, "chop_composite_min_score", 0.85))
             if composite < min_composite:
                 return None, self._ko(f"복합 스코어 부족 ({composite:.2f} < {min_composite})", f"Composite score too low ({composite:.2f} < {min_composite})")
@@ -4157,8 +4158,9 @@ class TickEngine:
                 return
 
         # [PATCH-11] chop 레짐에서 동시 포지션 제한
+        # [PATCH-16] auto_tune 꺼져있으면 chop 제한 무시 (regime 항상 chop 고정이므로)
         _chop_max = int(getattr(self.config, "chop_max_open_symbols", 0) or 0)
-        if _chop_max > 0:
+        if _chop_max > 0 and getattr(self.config, "auto_tune_enabled", False):
             _cur_regime = ""
             if hasattr(self, "auto_tuner") and self.auto_tuner:
                 _cur_regime = getattr(self.auto_tuner, "current_regime", "") or ""
@@ -4181,8 +4183,9 @@ class TickEngine:
         # Kelly 사이징: 실적 기반 동적 포지션 비율 (데이터 부족 시 config 값 사용)
         position_pct = max(0.0, self._kelly_position_pct())
         # [PATCH-12] chop 레짐에서 포지션 사이즈 축소
+        # [PATCH-16] auto_tune 꺼져있으면 chop 사이즈 축소 무시
         _cur_regime_pos = ""
-        if hasattr(self, "auto_tuner") and self.auto_tuner:
+        if getattr(self.config, "auto_tune_enabled", False) and hasattr(self, "auto_tuner") and self.auto_tuner:
             _cur_regime_pos = getattr(self.auto_tuner, "current_regime", "") or ""
         if _cur_regime_pos == "chop":
             _chop_mult = float(getattr(self.config, "chop_position_pct_mult", 0.5))

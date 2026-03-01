@@ -67,7 +67,7 @@ LOG_KEEP_BYTES = 1_500_000
 # Locked settings: these are enforced on load and on every save.
 # Rationale: remove end-user access to auto-tuning controls.
 LOCKED_GUI_SETTINGS = {
-    "auto_tune_enabled": True,
+    "auto_tune_enabled": False,  # [PATCH-16] 비활성화 — 노이즈 학습으로 파라미터 오염
     # auto_tune_mode는 사용자가 프리셋으로 선택하므로 잠금 제외
 }
 class BotGUI:
@@ -80,7 +80,7 @@ class BotGUI:
             "volatility_min": 0.001,
             "momentum_min_long": 0.001,
             "momentum_min_short": -0.001,
-            "auto_tune_enabled": True,
+            "auto_tune_enabled": False,  # [PATCH-16]
             "leverage_min": 1,    # [PATCH-14] 5→1 config 정렬
             "leverage_max": 10,   # [PATCH-14] 25→10 config 정렬
             "watch_limit": 10,

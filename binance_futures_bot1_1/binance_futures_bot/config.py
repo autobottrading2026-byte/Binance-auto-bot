@@ -72,7 +72,7 @@ class EngineConfig:
     # ═══════════════════════════════════════════════════════════
     # 🔧 수정 #2: Auto-Tune 설정
     # ═══════════════════════════════════════════════════════════
-    auto_tune_enabled: bool = True
+    auto_tune_enabled: bool = False  # [PATCH-16] 비활성화 — 16샘플 미니배치로 노이즈 학습
     auto_tune_mode: str = "balanced"  # "conservative" | "balanced" | "aggressive"
     
     total_risk_budget: float = 0.10
@@ -180,8 +180,10 @@ class EngineConfig:
     # ═══════════════════════════════════════════════════════════
     # 거래 분석: TIME_STOP 2건 (1승 1패)
     # → 더 연장하여 TP 도달 시간 확보
-    time_stop_seconds: int = 1800    # 1200 → 1800초 (30분)
-    
+    enable_time_stop: bool = False         # [PATCH-16] 비활성화 — 이전 분석 6건 전부 손실
+    time_stop_seconds: int = 1800
+
+    enable_signal_decay_exit: bool = False  # [PATCH-16] 비활성화 — 횡보 구간에서 수익 포지션 조기 청산
     signal_decay_window: int = 300
     signal_decay_threshold: float = 0.25  # [PATCH-7] 0.4→0.25: 신호 감쇠 허용 범위 확대 (조기 청산 방지)
     signal_decay_min_profit: float = 3.5  # [PATCH-8] 2.0→3.5: ROI 3.5% 미만에서 signal decay 청산 차단 (조기 청산 방지)
@@ -225,7 +227,7 @@ class EngineConfig:
     enable_profit_exit_layer: bool = True
     enable_partial_take_profit: bool = True
     enable_atr_trailing_stop: bool = True
-    enable_progress_stop: bool = True
+    enable_progress_stop: bool = False  # [PATCH-16] 비활성화 — 30분 타이머가 수익 포지션 조기 청산
 
     partial_tp_levels: list = field(
         default_factory=lambda: [
