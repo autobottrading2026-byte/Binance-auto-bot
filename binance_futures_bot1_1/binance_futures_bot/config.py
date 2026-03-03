@@ -5,37 +5,31 @@ from dataclasses import dataclass, field
 class EngineConfig:
     """
     ═══════════════════════════════════════════════════════════════════
-    🚨 Auto-Tuner 수정 버전 (v3.4) - 2026-02-28
+    🚨 Auto-Tuner v2 + P0-P1 패치 적용 (v3.5) - 2026-03-02
     ═══════════════════════════════════════════════════════════════════
-    Auto-Tuner 범위 수정:
-    - watch_limit 최소: 5 → 10
-    - max_open_symbols 최소: 2 → 5
-    - balanced 모드: (10-20개, 5-12개)
-    - aggressive 모드: (12-20개, 6-14개)
-    - conservative 모드: (8-15개, 4-10개)
-    
-    추가 수정사항 (v2.0 기반):
-    1. 손절: 2.5 → 1.0 (60% 감소)
-    2. Take Profit 활성화
-    3. 진입 조건 강화
-    4. Auto-Tuner: 활성화 (수정본 적용)
-    
-    🆕 v3.3 추가 (올바른 접근):
-    5. ATR 상한 필터 추가 (블랙리스트 대신)
-       - 거래 분석: POWERUSDT에서 큰 손실 발생
-       - 원인: 변동성이 너무 높아서 손절 폭 거대
-       - 해결: ATR 상한선으로 과도한 변동성 심볼 차단
-       - 효과: 나쁜 진입만 걸러내고, 좋은 진입은 유지
-       - 블랙리스트 방식의 문제점 해결 (기회 손실 방지)
-    
-    🆕 v3.4 추가 (청산 최적화):
-    6. Take Profit 레벨 조정 (0.8→0.6, 1.2→1.0)
-       - 거래 분석: TP 1건만 작동 (2.6%)
-       - 문제: SIGNAL_DECAY가 TP 전에 발동 (73.7%)
-       - 해결: TP 레벨을 더 가깝게 조정
-       - 효과: TP 도달 가능성 증가, 평균 수익 +2.18% → +3.5%
-    7. 보유 시간 연장 (120→180초, TIME_STOP 1200→1800초)
-    8. Trailing Stop 강화 (0.001→0.0015)
+    v3.4 기반 + P0-P1 패치 통합:
+
+    [P0] 즉시 반영 (C1/C3):
+    - BOOT_RESET: 기동 시 파라미터 baseline 강제 리셋
+    - Maker offset/timeout: 1.0bps / 3000ms
+
+    [P1-C2] R:R 개선:
+    - sl_atr_mult: 2.0 → 1.5 (평균 손실 축소)
+    - trail_activate_pnl_pct: 0.008 → 0.005 (수익 보호 조기화)
+
+    [P1-I1] 레짐 신뢰도 + 쿨다운:
+    - 최소 신뢰도: chop ≥ 0.10 / trend ≥ 0.15
+    - rollback_cooldown: 600 → 300초
+
+    [P1-I2] 동적 클램프:
+    - volatility_min 상한: 고정 0.006 → baseline + 0.001
+
+    [P1-I3] chop 숏 모멘텀 완화:
+    - good chop: baseline + 0.001, bad chop: baseline + 0.0005
+
+    [Neural v4 대기]:
+    - 26피처 + Feature Attention + 레짐별 헤드 + MC Dropout
+    - config.neural_scorer_version = "v4" 로 활성화 (거래 30건+ 후)
     ═══════════════════════════════════════════════════════════════════
     """
     
@@ -65,15 +59,42 @@ class EngineConfig:
     # 🚨 긴급: 진입 조건 강화 (품질 향상)
     # ═══════════════════════════════════════════════════════════
     volatility_min: float = 0.003           # 0.002 → 0.003 (50% 증가)
-    momentum_min_long: float = 0.005        # 0.003 → 0.005 (67% 증가)
-    momentum_min_short: float = -0.0055     # [PATCH-9] -0.008 → -0.0055 (숏 비대칭 완화, 방향 분산)
+    momentum_min_long: float = 0.003         # [v2] 0.005 → 0.003: 횡보장 진입 기회 확보
+    momentum_min_short: float = -0.004      # [v2] -0.0055 → -0.004: 숏 진입 완화
     momentum_min: float = 0.0
     
     # ═══════════════════════════════════════════════════════════
     # 🔧 수정 #2: Auto-Tune 설정
     # ═══════════════════════════════════════════════════════════
-    auto_tune_enabled: bool = False  # [PATCH-16] 비활성화 — 16샘플 미니배치로 노이즈 학습
+    auto_tune_enabled: bool = True   # [v2] 재활성화 — EMA 수렴 + apply cadence로 진동 제거
     auto_tune_mode: str = "balanced"  # "conservative" | "balanced" | "aggressive"
+
+    # ═══════════════════════════════════════════════════════════
+    # AutoTuner v2 — 안정화 + 성능 고도화 설정
+    # ═══════════════════════════════════════════════════════════
+    # 적용 주기: propose는 매 틱(5초), apply는 이 간격 이상일 때만
+    auto_tune_apply_interval_sec: int = 300       # 5분
+    # 레짐 최소 유지시간
+    regime_min_hold_sec: int = 180                # 3분
+    # 레짐 전환 비용: confidence 차이가 이 값 이상이어야 전환 허용
+    regime_switch_penalty: float = 0.08
+    # 시간당 레짐 전환 상한 (초과 시 30분 락 + chop 강제)
+    regime_switch_max_per_hour: int = 3
+    # 롤백 쿨다운
+    auto_tune_rollback_cooldown_sec: int = 300    # [P1-I1] 600→300s: chop에서 튜너 적용 주기 단축 (5분)
+    # EMA 계수 — 진입 임계치 (민감)
+    tune_alpha_entry: float = 0.15
+    # EMA 계수 — 리스크 파라미터 (보수적)
+    tune_alpha_risk: float = 0.08
+    # risk_bias 확대(+1) 연속 충족 필요 횟수
+    risk_bias_confirm_count: int = 2
+    # confidence 가중치
+    conf_weight_trend: float = 0.55
+    conf_weight_quality: float = 0.20
+    conf_weight_noise: float = 0.20
+    conf_weight_pnl: float = 0.05
+    # Shadow-lite: baseline 대비 이 이상 변경이면 1회 유예
+    shadow_lite_threshold: float = 0.0012         # volatility_min 기준
     
     total_risk_budget: float = 0.10
     watch_limit: int = 10
@@ -158,16 +179,16 @@ class EngineConfig:
     tp_r_multiple_2: float = 2.5            # [PATCH-13] 1.0→2.5 (손절의 250%에서 전량 익절, 손익비 2.5:1)
     partial_tp_ratio: float = 0.5
     break_even_after_partial: bool = True
-    tp_min_roi_pct: float = 0.003           # 최소 ROI 0.3%
+    tp_min_roi_pct: float = 0.02            # [PATCH-18] 0.003→0.02: R-TP와 충돌 방지 (2% 최소 ROI)
     tp_cooldown_s: int = 30
     tp_working_type: str = "MARK_PRICE"
     
     # ═══════════════════════════════════════════════════════════
     # 🚨 긴급: 손절 대폭 타이트하게 (평균 손실 감소)
     # ═══════════════════════════════════════════════════════════
-    sl_atr_mult: float = 1.0         # [PATCH-9] 0.5→1.0: 손절 현실화 (노이즈 털림 방지, ATR sizing이 리스크 보정)
-    sl_atr_mult_chop: float = 0.8    # [PATCH-11] 1.0→0.8 chop 레짐 SL 타이트닝
-    sl_atr_mult_trend: float = 1.0   # [PATCH-11] 1.2→1.0 trend 레짐 SL 타이트닝
+    sl_atr_mult: float = 1.5         # [P1-C2] 2.0→1.5: R:R 개선 (avg loss 축소, 손익비 1:1.83→1:1.2 목표)
+    sl_atr_mult_chop: float = 1.4    # [PATCH-17] 0.8→1.4: 횡보 구간도 노이즈 여유 확보
+    sl_atr_mult_trend: float = 2.0   # [PATCH-17] 1.0→2.0: 추세 구간은 넓은 SL로 수익 극대화
     
     # ═══════════════════════════════════════════════════════════
     # 🔧 Trailing Stop 강화 (v3.4)
@@ -197,7 +218,7 @@ class EngineConfig:
     # ═══════════════════════════════════════════════════════════
     # 🚨 긴급: 진입 엣지 요구사항 강화
     # ═══════════════════════════════════════════════════════════
-    min_edge_over_fee_pct: float = 0.0015  # [PATCH-9] 0.005→0.0015: 엣지 기준 현실화 (B단계에서 비용실측 후 재조정)
+    min_edge_over_fee_pct: float = 0.003  # [PATCH-18] 0.002→0.003: 슬리피지/펀딩 포함 실질 BEP 반영
     
     min_margin_usdt: float = 1.0
 
@@ -236,14 +257,14 @@ class EngineConfig:
             {"r": 2.5, "close_frac": 0.40},   # [PATCH-13] TP3: 2.5R에서 40% (나머지 트레일링)
         ]
     )
-    maker_entry_use_taker: bool = True   # [PATCH-9] 진입은 taker(타이밍), 청산은 maker(비용) 분리
+    maker_entry_use_taker: bool = False   # [PATCH-17] True→False: maker-first 진입 활성화 (수수료 0.05%→0.02%, 60% 절감)
     trail_atr_period: int = 22
     
     # ═══════════════════════════════════════════════════════════
     # 🔧 수정 #9: 트레일링 스탑 보수적 조정
     # ═══════════════════════════════════════════════════════════
     trail_atr_mult: float = 1.7   # [PATCH-9] 2.0→1.7: 수익 보호 강화 (리스크 대비 촘촘하게)
-    trail_activate_pnl_pct: float = 0.008  # [PATCH-10] 0.01→0.008: ROI 0.8%에서 트레일링 활성화 (trend 시)
+    trail_activate_pnl_pct: float = 0.005  # [P1-C2] 0.008→0.005: ROI 0.5%에서 트레일링 활성화 (수익 보호 조기화)
     
     trail_use_highest_since_entry: bool = True
     trail_recalc_interval_sec: int = 5
@@ -291,6 +312,8 @@ class EngineConfig:
     kelly_sizing_enabled: bool = True
     kelly_fraction: float = 0.25
     kelly_min_samples: int = 10
+    kelly_freeze_threshold: int = 200   # [PATCH-17] 200거래 이전: 고정분할 (추정오차 방지)
+    kelly_blend_threshold: int = 500    # [PATCH-17] 200~500: 혼합(고정70%+Kelly30%), 500+: Full Kelly
 
     # --- Maker-first entry ---
     # ═══════════════════════════════════════════════════════════
@@ -298,13 +321,13 @@ class EngineConfig:
     # ═══════════════════════════════════════════════════════════
     maker_first_enabled: bool = True
     maker_first_offset_bps: float = 1.0
-    maker_first_timeout_ms: int = 1000       # [PATCH-9] 3000→1000ms: 진입 지연 축소 (타이밍 알파 보존)
+    maker_first_timeout_ms: int = 3000       # [P0-C3] 2000→3000ms: 메이커 체결률 향상 (8건 전부 taker 문제 해결)
     # [PATCH-3] 적응형 메이커 파라미터
     maker_adaptive_timeout: bool = True       # 변동성 연동 타임아웃
     maker_timeout_min_ms: int = 1000          # 최소 1초 (고변동성)
     maker_timeout_max_ms: int = 5000          # 최대 5초 (저변동성)
     maker_offset_adaptive: bool = True        # 스프레드 연동 오프셋
-    maker_offset_min_bps: float = 0.5         # 최소 오프셋
+    maker_offset_min_bps: float = 1.0         # [P0-C3] 0.5→1.0: 스프레드 내부 깊숙이 배치 (메이커 체결률 향상)
     maker_offset_max_bps: float = 3.0         # 최대 오프셋
     maker_spread_mult: float = 0.5            # 스프레드의 50%를 오프셋에 추가
 
@@ -333,10 +356,15 @@ class EngineConfig:
     # ═══════════════════════════════════════════════════════════
     max_consecutive_rollbacks: int = 3     # 변경: 5 → 3
 
-    # --- 온라인 학습 신경망 [프리미엄 v3] ---
+    # --- 온라인 학습 신경망 [프리미엄] ---
     neural_scorer_enabled: bool = False
     neural_license_key: str = ""
     neural_block_threshold: float = 0.25  # v3: win_prob < 이 값이면 진입 거부
+    # ── [v4] Neural Scorer v4 설정 (활성화 시 v3 대체) ──
+    neural_scorer_version: str = "v3"       # "v3" | "v4" — v4 활성화 시 regime-aware attention 사용
+    neural_v4_mc_samples: int = 5           # MC Dropout 샘플 수 (높을수록 정확, 느림)
+    neural_v4_uncertainty_block: float = 0.15  # 불확실성 > 이 값이면 예측 신뢰 안함
+    neural_v4_cold_start_trades: int = 30   # 이 수 이상 학습해야 예측 활성화
     tca_spread_estimate_bps: float = 5.0  # spread_bps가 0일 때 추정 대체값
 
     # --- Funding rate filter ---
@@ -372,52 +400,45 @@ class EngineConfig:
     chop_composite_min_score: float = 0.85       # chop에서 진입 임계값 상향 (일반 0.72 → 0.85)
     chop_position_pct_mult: float = 0.5          # chop에서 포지션 사이즈 50%로 축소
 
+    # ── [PATCH-17] 상관성 동시진입 제한 ──
+    # 크립토는 BTC/ETH 동조화가 강함 → 같은 방향 메이저 동시진입 제한
+    same_direction_major_cap: int = 2      # BTC/ETH/BNB/SOL/XRP 중 같은 방향 최대 2개
+    max_same_direction_total: int = 6      # 전체 포지션 중 같은 방향 최대 6개
+
 
 # ═══════════════════════════════════════════════════════════════════
-# 📋 전체 변경 사항 요약
+# 📋 전체 변경 사항 요약 (v3.4 + P0-P1 패치 반영)
 # ═══════════════════════════════════════════════════════════════════
 #
 # 【레버리지 & 리스크】
-# 1. 레버리지: 40-41x → 10-15x (75% 감소)
-# 2. 손절 ATR 배수: 1.5 → 2.5 (67% 확대)
-# 3. 손실 한도: 18% → 12% (레버리지 낮췄으므로 조정)
+# 1. 레버리지: 1x ~ 10x (안전 범위)
+# 2. 손절 ATR 배수: 1.5x (기본) / 1.4x (chop) / 2.0x (trend)
+# 3. 손실 한도: 포지션당 1.8%, 세션 3.0%
 #
 # 【거래 빈도 & 수수료】
-# 4. 최소 보유 시간: 20초 → 120초 (6배 증가)
-# 5. 타임스탑: 10분 → 20분 (2배 증가)
-# 6. Maker 타임아웃: 1.5초 → 3.0초 (2배 증가)
-# 7. 진입 엣지 요구: 0.15% → 0.3% (2배)
+# 4. 최소 보유 시간: 180초 (3분)
+# 5. 적응형 타임스탑: 600~7200초 (ATR 기반)
+# 6. Maker 타임아웃: 3000ms (적응형 1000~5000ms)
+# 7. 진입 엣지 요구: 0.3%
 #
 # 【진입 조건】
-# 8. 복합 시그널 최소 스코어: 0.75 → 0.80 (6.7% 증가)
+# 8. 복합 시그널 최소 스코어: 0.80 (chop: 0.85)
+# 9. 변동성 최소: 0.003, ATR 상한: 3.0배
 #
-# 【수익 보호】
-# 9. 트레일링 스탑: ATR 1.5배 → 2.0배 (33% 확대)
-# 10. 트레일링 활성화: 10% → 15% ROI (50% 증가)
+# 【수익 보호 — P1-C2 반영】
+# 10. 트레일링 스탑: ATR x 1.7
+# 11. 트레일링 활성화: ROI 0.5% (0.008→0.005)
+# 12. R:R 개선: sl_atr_mult 2.0→1.5 (평균 손실 축소)
 #
-# 【Auto-Tune 안전장치】
-# 11. 롤백 임계값: $50 → $10 (80% 감소)
-# 12. 롤백 실패 횟수: 5회 → 3회 (40% 감소)
-# 13. 연속 롤백 제한: 5회 → 3회 (40% 감소)
+# 【Auto-Tune v2 — P1-I1/I2/I3 반영】
+# 13. 레짐별 신뢰도 기준: chop ≥ 0.10, trend ≥ 0.15
+# 14. 롤백 쿨다운: 600→300초 (5분)
+# 15. volatility_min 클램프 상한: baseline + 0.001 (동적)
+# 16. chop 숏 모멘텀 완화: good +0.001 / bad +0.0005
+# 17. 롤백 임계값: $10, 연속 3회 제한
 #
-# ═══════════════════════════════════════════════════════════════════
-# 🎯 예상 효과
-# ═══════════════════════════════════════════════════════════════════
-#
-# • 승률: 33% → 45-50% 예상 (손절 여유 확대)
-# • 수수료 부담: 87% → 40-50%로 감소 (거래 빈도 감소)
-# • 기댓값: -0.7 → +0.3~+0.5 예상 (승률 개선)
-# • 레버리지 낮춤으로 계좌 안정성 대폭 향상
-# • Auto-Tune이 레버리지 40배까지 올리는 문제 해결
-# • 손실 발생 시 빠른 롤백으로 손실 최소화
-#
-# ═══════════════════════════════════════════════════════════════════
-# ⚠️ 중요 참고사항
-# ═══════════════════════════════════════════════════════════════════
-#
-# 1. 테스트넷에서 최소 3일 테스트 후 실전 배포
-# 2. 실전 배포 시 소액($100-500)으로 1주일 검증
-# 3. auto_tuner_fixed.py와 함께 사용해야 함
-# 4. 주간 리뷰로 승률, 기댓값, 수수료 비중 모니터링
+# 【Neural Scorer】
+# 18. v3: 20피처 듀얼헤드 (현재 활성)
+# 19. v4: 26피처 + Feature Attention + 레짐별 헤드 + MC Dropout (대기 중)
 #
 # ═══════════════════════════════════════════════════════════════════

@@ -17,10 +17,18 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from collections import deque
 
+# ── Windows 작업표시줄 아이콘 설정 ──
+# AppUserModelID를 설정해야 작업표시줄에 커스텀 아이콘이 표시됨
+try:
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BinanceAutoBot.TradingUI.1.1")
+except (AttributeError, OSError):
+    pass  # non-Windows 환경
+
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 # ── [PATCH-11] 버전 관리 ──
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.16"
 APP_NAME = "Binance Auto Trading Bot"
 GITHUB_REPO = "autobottrading2026-byte/Binance-auto-bot"
 # ── 레퍼럴 코드 난독화 + 무결성 체크 ──
@@ -51,13 +59,14 @@ LOG_DIR = os.path.join(BOT_ROOT, "logs")
 # A1: consent version — bump this when the risk notice text changes to force re-acknowledgement
 CONSENT_VERSION = "v1.1-d8de2b46"
 
-TITLE = "바이낸스 자동 매매 UI v1.1"
+TITLE = "바이낸스 자동 매매 UI"
 CONFIG_PATH = "gui_config.json"
 STATE_PATH = "gui_state.json"
 LOG_PATH = os.path.join(LOG_DIR, "bot.log")
 NOTIFICATION_PATH = os.path.join(LOG_DIR, "notifications.log")
 TRADE_LOG_PATH = os.path.join(LOG_DIR, "trade_history.jsonl")
 AUTO_TUNE_STATE_PATH = os.path.join(LOG_DIR, "auto_tuner_state.json")
+METRICS_PATH = os.path.join(LOG_DIR, "metrics.jsonl")
 MAX_LOG_BYTES = 2_000_000
 LOG_KEEP_BYTES = 1_500_000
 
@@ -67,8 +76,26 @@ LOG_KEEP_BYTES = 1_500_000
 # Locked settings: these are enforced on load and on every save.
 # Rationale: remove end-user access to auto-tuning controls.
 LOCKED_GUI_SETTINGS = {
-    "auto_tune_enabled": False,  # [PATCH-16] 비활성화 — 노이즈 학습으로 파라미터 오염
+    # [v2] auto_tune_enabled 잠금 해제 — EMA 수렴 + apply cadence로 진동 문제 해결됨
     # auto_tune_mode는 사용자가 프리셋으로 선택하므로 잠금 제외
+}
+
+# ── PATCH-protected keys: GUI 저장 시 이 키들은 아래 값으로 강제 복원 ──
+# Expert Mode에서만 사용자 변경 허용; 일반 모드에서는 항상 이 값으로 덮어씀
+PATCH_PROTECTED_DEFAULTS = {
+    "partial_tp_levels": [
+        {"r": 1.0, "close_frac": 0.30},
+        {"r": 1.5, "close_frac": 0.30},
+        {"r": 2.5, "close_frac": 0.40},
+    ],
+    "trail_activate_pnl_pct": 0.005,  # [P1-C2] 0.008→0.005: 수익 보호 조기화
+    "maker_entry_use_taker": False,
+    "position_pct": 0.06,
+    "position_base_pct": 0.06,
+    "composite_min_score": 0.80,
+    "min_edge_over_fee_pct": 0.003,
+    "entry_risk_pct": 0.01,
+    "tp_min_roi_pct": 0.02,
 }
 class BotGUI:
     def __init__(self):
@@ -78,9 +105,9 @@ class BotGUI:
             "position_pct": 0.06,        # [PATCH-14] 0.05→0.06 config 정렬
             "top_n": 20,
             "volatility_min": 0.001,
-            "momentum_min_long": 0.001,
-            "momentum_min_short": -0.001,
-            "auto_tune_enabled": False,  # [PATCH-16]
+            "momentum_min_long": 0.003,       # [v2] 0.001→0.003 config 정렬
+            "momentum_min_short": -0.004,     # [v2] -0.001→-0.004 config 정렬
+            "auto_tune_enabled": True,  # [v2] 재활성화
             "leverage_min": 1,    # [PATCH-14] 5→1 config 정렬
             "leverage_max": 10,   # [PATCH-14] 25→10 config 정렬
             "watch_limit": 10,
@@ -114,7 +141,7 @@ class BotGUI:
             "enable_profit_exit_layer": True,
             "enable_partial_take_profit": True,
             "enable_atr_trailing_stop": True,
-            "enable_progress_stop": True,
+            "enable_progress_stop": False,  # [PATCH-16] 비활성화
             "partial_tp_levels": [
                 {"r": 1.0, "close_frac": 0.30},
                 {"r": 1.5, "close_frac": 0.30},
@@ -122,7 +149,7 @@ class BotGUI:
             ],
             "trail_atr_period": 22,
             "trail_atr_mult": 1.5,
-            "trail_activate_pnl_pct": 0.10,
+            "trail_activate_pnl_pct": 0.005,  # [P1-C2] ROI 0.5%에서 트레일링 활성화
             "trail_use_highest_since_entry": True,
             "trail_recalc_interval_sec": 5,
             "progress_stop_lookback_sec": 1800,
@@ -153,6 +180,7 @@ class BotGUI:
             "settings_tab_display": {"ko": "화면설정", "en": "Display"},
             "settings_tab_dev": {"ko": "필수 동의", "en": "Agreement"},
             "settings_tab_report": {"ko": "리포트", "en": "Report"},
+            "settings_tab_about": {"ko": "정보", "en": "About"},
             "api_settings_title": {"ko": "API 설정", "en": "API setup"},
             "default_env_title": {"ko": "기본 실행 환경", "en": "Default environment"},
             "language_title": {"ko": "언어 / Language", "en": "Language"},
@@ -278,7 +306,7 @@ class BotGUI:
             "risk_ack_msg": {"ko": "지정 코인 수동 매매를 사용하려면 '필수 동의' 탭에서 동의 체크박스를 활성화하세요.", "en": "To use manual trading, enable the acknowledgement checkbox in the Agreement tab."},
             "price_missing_title": {"ko": "가격 정보 없음", "en": "Price unavailable"},
             "alert": {"ko": "알림", "en": "Notice"},
-            "app_title": {"ko": "바이낸스 자동 매매 UI v1.1", "en": "Binance Auto Trading UI v1.1"},
+            "app_title": {"ko": "바이낸스 자동 매매 UI", "en": "Binance Auto Trading UI"},
             "quick_links": {"ko": "빠른 링크", "en": "Quick links"},
             "link_binance": {"ko": "바이낸스", "en": "Binance"},
             "link_testnet": {"ko": "테스트넷", "en": "Testnet"},
@@ -294,12 +322,12 @@ class BotGUI:
                 "en": "Learns from each trade outcome to predict win probability.\nAuto-learns after every close. Learning persists across restarts.\nStrong signals are amplified; weak ones are filtered.",
             },
             "premium_feature_how_title": {"ko": "작동 방식", "en": "How It Works"},
-            "premium_feature_h1":        {"ko": "📥  진입 시 12개 피처 수집", "en": "📥  12 features captured at entry"},
-            "premium_feature_d1":        {"ko": "모멘텀 강도 · 변동성 · 거래량 서지 · MTF EMA 기울기 · 스프레드 · 펀딩레이트 · 레짐 · 진입 시각 등", "en": "Momentum · Volatility · Volume surge · MTF EMA slope · Spread · Funding rate · Regime · Entry time"},
+            "premium_feature_h1":        {"ko": "📥  진입 시 20개 피처 수집 (v3) / 26개 (v4)", "en": "📥  20 features at entry (v3) / 26 (v4)"},
+            "premium_feature_d1":        {"ko": "모멘텀 강도 · 변동성 · 거래량 서지 · MTF EMA 기울기 · 스프레드 · 펀딩레이트 · 레짐 · 진입 시각 · 방향일치 등\nv4 추가: 최근 승률 · 연패횟수 · 전 거래 ROI · 마지막 거래 이후 경과시간 · 포지션 수 · 레짐 신뢰도", "en": "Momentum · Volatility · Volume surge · MTF EMA slope · Spread · Funding rate · Regime · Entry time · Dir match\nv4 adds: recent win rate · loss streak · last ROI · time since last trade · open positions · regime confidence"},
             "premium_feature_h2":        {"ko": "🎓  청산 후 자동 학습", "en": "🎓  Auto-learns after close"},
             "premium_feature_d2":        {"ko": "수익(✅) / 손실(❌) 결과를 라벨로 신경망 가중치 업데이트.\nExperience Replay로 과거 거래도 반복 학습(망각 방지).", "en": "Win/Loss outcome updates neural network weights.\nExperience Replay re-trains on past trades (prevents forgetting)."},
             "premium_feature_h3":        {"ko": "🎯  다음 진입에 반영", "en": "🎯  Applied to next entry"},
-            "premium_feature_d3":        {"ko": "v3: 20개 피처 + 듀얼헤드(승률+ROI예측)로 진입 보정 0.0x~2.0x.\n승률 25% 미만은 진입 차단. 적응형 학습률 자동 조절.", "en": "v3: 20 features + dual-head (win prob + ROI prediction), strength 0.0x–2.0x.\nBlocks entry when win prob < 25%. Adaptive learning rate."},
+            "premium_feature_d3":        {"ko": "v3: 20개 피처 + 듀얼헤드(승률+ROI예측)로 진입 보정 0.0x~2.0x.\n승률 25% 미만은 진입 차단. 적응형 학습률 자동 조절.\nv4 (대기 중): 26개 피처 + Feature Attention + 레짐별 분리 헤드(Trend/Chop/ROI) + MC Dropout 불확실성 추정.", "en": "v3: 20 features + dual-head (win prob + ROI prediction), strength 0.0x–2.0x.\nBlocks entry when win prob < 25%. Adaptive learning rate.\nv4 (standby): 26 features + Feature Attention + regime-conditioned heads (Trend/Chop/ROI) + MC Dropout uncertainty."},
             "premium_toggle_label":      {"ko": "AI 스코어러 활성화", "en": "Enable AI Scorer"},
             "premium_toggle_on":         {"ko": "ON — 진입 strength 보정 중", "en": "ON — adjusting entry strength"},
             "premium_toggle_off":        {"ko": "OFF — 예측 미적용 (데이터 수집·학습만 진행)", "en": "OFF — prediction not applied (data collection & learning active)"},
@@ -357,7 +385,7 @@ class BotGUI:
             "auto_tune_unlocked": {"ko": "수동 설정이 잠금 해제되었습니다.", "en": "Manual controls are unlocked."},
             "auto_tune_restart_prompt": {"ko": "자동 튜닝 토글 변경으로 엔진을 다시 시작할까요?", "en": "Auto-tune setting changed. Restart the engine now?"},
             "auto_tune_toggle_label": {"ko": "Auto-tune 활성화", "en": "Enable auto-tune"},
-            "auto_tune_helper_on": {"ko": "Auto-tune이 켜져 있습니다. 최근 시장 데이터를 기반으로 파라미터를 자동 조정합니다.", "en": "Auto-tune is enabled and adjusts parameters using recent market data."},
+            "auto_tune_helper_on": {"ko": "Auto-tune v2 활성 — EMA 수렴 방식으로 레짐(추세/횡보)에 맞게 5분마다 파라미터를 자동 조정합니다.\n레짐별 신뢰도 기준: chop ≥ 0.10 / trend ≥ 0.15. 롤백 쿨다운 5분.", "en": "Auto-tune v2 active — adjusts parameters every 5 min via EMA convergence, adapting to market regime (trend/chop).\nRegime confidence thresholds: chop ≥ 0.10 / trend ≥ 0.15. Rollback cooldown 5 min."},
             "auto_tune_helper_off": {"ko": "파라미터가 수동 값으로 고정됩니다. 필요 시 수정 후 저장하세요.", "en": "Parameters are fixed to manual values. Adjust and save if needed."},
             "auto_boost_label": {"ko": "포지션 비율 자동 보정 (최소 증거금 부족 시 Position % 자동 증가)", "en": "Auto-boost position % (increase entry size when margin is insufficient)"},
             "mode_aggressive": {"ko": "공격", "en": "Aggressive"},
@@ -381,7 +409,7 @@ class BotGUI:
             "display_show_manual_panel": {"ko": "지정 코인 수동 매매 패널 표시", "en": "Show manual trading panel (selected coins)"},
             "display_hide_panel_hint": {"ko": "패널을 숨기면 메인 화면에서 포지션 창이 바로 위 카드 밑으로 이동합니다.", "en": "Hiding the panel moves the Positions view directly under the top cards."},
             "auto_tune_reset": {"ko": "Auto-Tune 초기화", "en": "Reset Auto-Tune"},
-            "auto_tune_desc": {"ko": "실시간 튜너가 포지션 필터·모멘텀 값을 조정합니다.", "en": "The live tuner adjusts position filters and momentum parameters."},
+            "auto_tune_desc": {"ko": "Auto-Tune v2: EMA 수렴 방식으로 모멘텀·변동성·포지션을 레짐에 맞게 자동 조정합니다. (5분 간격)", "en": "Auto-Tune v2: smoothly adjusts momentum, volatility & position via EMA convergence, regime-aware. (5-min interval)"},
             "auto_tune_update": {"ko": "업데이트: -", "en": "Updated: -"},
             "manual_tune_section": {"ko": "수동 튜닝", "en": "Manual tuning"},
             "manual_edit_hint": {"ko": "Auto-tune이 OFF일 때만 아래 값을 수정할 수 있습니다.", "en": "You can edit the values below only when auto-tune is OFF."},
@@ -435,7 +463,7 @@ class BotGUI:
             "status_proposed": {"ko": "제안/롤백", "en": "Proposed/rollback"},
             "status_last_apply": {"ko": "마지막 적용/롤백", "en": "Last apply/rollback"},
             "display_max_symbols_hint": {"ko": "최대 2개까지 선택할 수 있습니다.", "en": "You can select up to 2 symbols."},
-            "auto_tune_reset_tooltip": {"ko": "Auto-Tune 학습 데이터를 초기화합니다. 엔진 재시작 후 기본값으로 재적용됩니다.", "en": "Resets Auto-Tune learned state. Default values will be re-applied after engine restart."},
+            "auto_tune_reset_tooltip": {"ko": "Auto-Tune v2 학습 데이터(EMA 지표, 레짐, 목표값)를 초기화합니다. 재시작 후 config 기본값으로 재적용됩니다.", "en": "Resets Auto-Tune v2 learned state (EMA metrics, regime, targets). Config defaults re-applied after restart."},
 
             # ── 다크 다이얼로그 / 알림창 공통 ──────────────────────────
             "dlg_ok": {"ko": "확인", "en": "OK"},
@@ -555,8 +583,14 @@ class BotGUI:
             "monitor_last_filter":      {"ko": "최근 필터 실행",          "en": "Last filter run"},
             "monitor_engine_off":       {"ko": "엔진이 정지 상태입니다",   "en": "Engine is stopped"},
 
-
-    
+            # ── 누락 번역 키 추가 ──────────────────────────────────────
+            "referral_title":               {"ko": "레퍼럴 코드 / Referral Code", "en": "Referral Code"},
+            "aggressive_locked_tip":        {"ko": "Aggressive 모드는 Expert 모드 활성화 시 사용 가능합니다 (필수 동의 탭).", "en": "Aggressive mode requires Expert Mode (Agreement tab)."},
+            "aggressive_expert_warn":       {"ko": "Aggressive 모드는 Expert 모드 활성화 시 사용 가능합니다 (필수 동의 탭).", "en": "Aggressive mode requires Expert Mode to be enabled (Agreement tab)."},
+            "aggressive_confirm_title":     {"ko": "Aggressive 모드 — 고위험 확인", "en": "Aggressive Mode — High Risk"},
+            "aggressive_confirm_msg":       {"ko": "Aggressive 모드는 leverage_max 및 position_pct를 상향하고 필터를 완화합니다.\n변동성이 높은 시장에서 원금 대비 대폭 손실이 발생할 수 있습니다.\n\n계속하시겠습니까?", "en": "Aggressive mode increases leverage_max and position_pct, and relaxes filters.\nThis may cause significant losses in volatile markets.\n\nContinue?"},
+            "field_min_margin_usdt":        {"ko": "최소 증거금 (USDT)", "en": "Min Margin (USDT)"},
+            "action_close_limit_then_market": {"ko": "Close (limit→market)", "en": "Close (limit→market)"},
         }
 
         allowed_modes = {"aggressive", "balanced", "conservative"}
@@ -736,6 +770,10 @@ class BotGUI:
         if os.path.basename(path) == os.path.basename(CONFIG_PATH):
             for _k, _v in LOCKED_GUI_SETTINGS.items():
                 data[_k] = _v
+            # PATCH-protected keys: Expert Mode가 아니면 최적화 값으로 강제 복원
+            if not data.get("expert_mode_enabled", False):
+                for _k, _v in PATCH_PROTECTED_DEFAULTS.items():
+                    data[_k] = _v
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
 
@@ -1579,12 +1617,13 @@ class BotGUI:
                     "이 UI는 Binance USDT-M 선물 자동매매 엔진(v1.1.0)을 운영·모니터링하는 콘솔입니다.\n\n"
                     "• START/STOP으로 엔진 프로세스를 제어합니다.\n"
                     "• 프리셋(공격/기본/보수) 버튼으로 자동매매 전략을 전환합니다.\n"
-                    "• Auto-tune이 켜져 있으면 시장 상황에 따라 파라미터가 자동 조정됩니다.\n"
+                    "• Auto-tune v2가 켜져 있으면 EMA 수렴 방식으로 파라미터가 부드럽게 자동 조정됩니다.\n"
+                    "  - 5분 간격 적용, 레짐(추세/횡보) 기반 목표값, Shadow-lite 검증\n"
                     "• 거래 로직 패널에서 현재 엔진에 적용 중인 유효 파라미터를 확인할 수 있습니다.\n\n"
                     "설정 탭 구성:\n"
                     "  환경설정  — API 환경(테스트넷/실거래), 언어 설정, 환경변수 가이드\n"
                     "  화면설정  — 수동 매매 패널, 세션 상태 초기화\n"
-                    "  거래설정  — 포지션 크기, 레버리지, 오토튜닝, 전략 체크박스\n"
+                    "  거래설정  — 포지션 크기, 레버리지, 오토튜닝(v2), 전략 체크박스\n"
                     "  리포트    — 거래 기록 조회, 통계, 메이커/테이커 수수료 현황\n"
                     "  필수 동의  — 리스크 경고 동의 (2항목 모두 체크 필요)\n"
                     "  프리미엄  — Neural Scorer 라이선스 키 입력, 구독 결제\n"
@@ -1592,12 +1631,13 @@ class BotGUI:
                     "This UI is an operations console for the Binance USDT-M Futures auto-trading engine (v1.1.0).\n\n"
                     "• START/STOP controls the engine process.\n"
                     "• Use preset buttons (Aggressive / Balanced / Conservative) to switch strategy.\n"
-                    "• When Auto-tune is ON, parameters adjust automatically based on market conditions.\n"
+                    "• When Auto-tune v2 is ON, parameters adjust smoothly via EMA convergence.\n"
+                    "  - 5-min apply interval, regime-based targets, Shadow-lite validation\n"
                     "• The Trading Logic panel shows the effective parameters currently applied by the engine.\n\n"
                     "Settings tabs:\n"
                     "  Env         — API environment (testnet / live), language, env variable guide\n"
                     "  Display     — Manual trading panel, session reset\n"
-                    "  Trade       — Position size, leverage, auto-tuning, strategy checkboxes\n"
+                    "  Trade       — Position size, leverage, auto-tuning (v2), strategy checkboxes\n"
                     "  Report      — Trade history, stats, maker/taker fee breakdown\n"
                     "  Agreement   — Risk acknowledgment (both checkboxes required)\n"
                     "  Premium     — Neural Scorer license key, subscription\n"
@@ -1642,14 +1682,16 @@ class BotGUI:
                 "presets",
                 _t("프리셋 모드", "Preset Mode"),
                 _t(
-                    "Auto-tune이 켜져 있으면 시장 상황에 따라 파라미터가 자동 조정됩니다.\n\n"
+                    "Auto-tune v2가 켜져 있으면 EMA 수렴 방식으로 파라미터가 부드럽게 자동 조정됩니다.\n"
+                    "레짐(추세↑/추세↓/횡보)에 따라 목표값이 달라지며, 5분마다 적용됩니다.\n\n"
                     "프리셋 버튼:\n"
                     "• 공격(Aggressive): 참여 폭↑ / 리스크·거래빈도↑\n"
                     "• 기본(Balanced): 기본 프로파일\n"
                     "• 보수(Conservative): 필터 강화 / 리스크·거래빈도↓\n\n"
                     "프리셋을 누르면 해당 버튼이 하이라이트되고 gui_config.json에 저장됩니다.\n"
                     "엔진 실행 중이라면 재시작(STOP → START) 후 적용됩니다.",
-                    "When Auto-tune is ON, parameters adjust automatically.\n\n"
+                    "When Auto-tune v2 is ON, parameters adjust smoothly via EMA convergence.\n"
+                    "Targets vary by regime (trend-up / trend-down / chop) and apply every 5 minutes.\n\n"
                     "Preset buttons:\n"
                     "• Aggressive: wider participation / higher risk & frequency\n"
                     "• Balanced: default profile\n"
@@ -1731,19 +1773,169 @@ class BotGUI:
                     "• logs/trade_history.jsonl — ENTRY/EXIT 이벤트\n"
                     "  포함 필드: symbol, pnl, roi_pct, trigger, fee_type, fee_amount, fee_rate,\n"
                     "             slippage_bps, spread_bps, leverage, order_id\n"
-                    "• logs/auto_tuner_state.json — 현재 오토튜닝 모드와 유효 파라미터\n"
+                    "• logs/metrics.jsonl — 5초마다 엔진 메트릭 + 60초마다 KPI 스냅샷\n"
+                    "  KPI 필드: tca_bps, maker_fill_rate, pipeline_pass_rate, regime_switch_rate,\n"
+                    "            ror_proxy, edge_after_fee_pct\n"
+                    "  EQ 필드: total_attempts, maker_fill_rate, fill_time_p50_ms/p90_ms\n"
+                    "• logs/auto_tuner_state.json — Auto-Tune v2 상태 (레짐, EMA 지표, 목표값, 현재 파라미터)\n"
                     "• logs/bot.log — 런타임 로그\n"
-                    "• logs/notifications.log — 알림 이벤트\n\n"
+                    "• logs/notifications.log — 알림 이벤트\n"
+                    "• feature_flags.json — 기능별 ON/OFF 토글 (봇 시작 시 자동 로드)\n\n"
                     "리포트 생성:\n"
                     "  python reports/metrics_report.py --window 12 --format markdown",
                     "• logs/trade_history.jsonl — ENTRY/EXIT events\n"
                     "  Fields: symbol, pnl, roi_pct, trigger, fee_type, fee_amount, fee_rate,\n"
                     "          slippage_bps, spread_bps, leverage, order_id\n"
-                    "• logs/auto_tuner_state.json — current auto-tune mode and active parameters\n"
+                    "• logs/metrics.jsonl — engine metrics every 5s + KPI snapshot every 60s\n"
+                    "  KPI fields: tca_bps, maker_fill_rate, pipeline_pass_rate, regime_switch_rate,\n"
+                    "              ror_proxy, edge_after_fee_pct\n"
+                    "  EQ fields: total_attempts, maker_fill_rate, fill_time_p50_ms/p90_ms\n"
+                    "• logs/auto_tuner_state.json — Auto-Tune v2 state (regime, EMA metrics, targets, current params)\n"
                     "• logs/bot.log — runtime log\n"
-                    "• logs/notifications.log — alert events\n\n"
+                    "• logs/notifications.log — alert events\n"
+                    "• feature_flags.json — feature toggles (auto-loaded on bot startup)\n\n"
                     "Generate a report:\n"
                     "  python reports/metrics_report.py --window 12 --format markdown"
+                ),
+            ),
+            (
+                "kpi_dashboard",
+                _t("KPI 대시보드", "KPI Dashboard"),
+                _t(
+                    "v3.5부터 6개 핵심 KPI를 실시간 추적합니다 (feature_flags.json에서 ON/OFF 가능).\n\n"
+                    "■ 핵심 KPI (매 틱 계산, 60초마다 metrics.jsonl 저장)\n"
+                    "  • TCA (bps): 슬리피지 + 스프레드 합산. 체결 비용이 수익을 잡아먹는지 판별\n"
+                    "  • Maker 체결률 (%): maker fills / total fills. maker-first가 실효인지 판별\n"
+                    "  • Pipeline 통과율 (%): signals_passed / signals_evaluated. 진입 병목 위치 파악\n"
+                    "  • 레짐 전환율 (/h): 시간당 레짐 변경 수. 3회 이하 안정, 5회 이상 불안정\n"
+                    "  • RoR Proxy (%): 세션 드로다운. 미실현 손실 / 잔고\n"
+                    "  • Edge After Fee (%): 실현 ROI - 수수료. 실질 순이익률\n\n"
+                    "■ GUI 표시\n"
+                    "  상단 카드 ▾ 드롭다운에서 KPI 카드 4종을 선택할 수 있습니다:\n"
+                    "  TCA(bps), Maker 체결률, Edge After Fee, 레짐 안정성\n\n"
+                    "■ 색상 기준\n"
+                    "  초록: 양호  /  노랑: 주의  /  빨강: 위험",
+                    "Since v3.5, 6 core KPIs are tracked in real-time (toggle via feature_flags.json).\n\n"
+                    "■ Core KPIs (computed every tick, saved to metrics.jsonl every 60s)\n"
+                    "  • TCA (bps): slippage + spread combined. Measures execution cost impact on PnL\n"
+                    "  • Maker Fill Rate (%): maker fills / total fills. Validates maker-first effectiveness\n"
+                    "  • Pipeline Pass Rate (%): signals_passed / signals_evaluated. Reveals entry bottleneck\n"
+                    "  • Regime Switch Rate (/h): regime changes per hour. ≤3 stable, ≥5 unstable\n"
+                    "  • RoR Proxy (%): session drawdown. Unrealized loss / balance\n"
+                    "  • Edge After Fee (%): realized ROI - fees. Net profitability\n\n"
+                    "■ GUI Display\n"
+                    "  Select KPI cards from the ▾ dropdown on top stat cards:\n"
+                    "  TCA(bps), Maker Fill Rate, Edge After Fee, Regime Stability\n\n"
+                    "■ Color Coding\n"
+                    "  Green: healthy  /  Yellow: caution  /  Red: critical"
+                ),
+            ),
+            (
+                "feature_flags",
+                _t("Feature Flags", "Feature Flags"),
+                _t(
+                    "feature_flags.json으로 기능별 ON/OFF를 제어합니다.\n"
+                    "봇 재시작 시 자동 로드되어 EngineConfig를 오버라이드합니다.\n\n"
+                    "■ 파일 위치: (봇 루트)/feature_flags.json\n\n"
+                    "■ 주요 플래그\n"
+                    "  • auto_tune_enabled: AutoTuner v2 활성화 (기본 ON)\n"
+                    "  • maker_first_enabled: 메이커 우선 진입 (기본 ON)\n"
+                    "  • kpi_tracker_enabled: KPI 대시보드 추적 (기본 ON)\n"
+                    "  • execution_quality_tracking: 심볼별 체결 품질 추적 (기본 ON)\n"
+                    "  • neural_scorer_enabled: Neural Scorer 활성화 (기본 OFF)\n"
+                    "  • consensus_scoring_enabled: 3-Party Consensus (기본 OFF)\n"
+                    "  • neural_v4_enabled: Neural v4 스코어러 (기본 OFF)\n\n"
+                    "■ 사용 예시\n"
+                    "  문제 발생 시 해당 기능 플래그를 false로 변경 후 재시작하면\n"
+                    "  코드 수정 없이 즉시 안전 모드로 전환 가능합니다.\n\n"
+                    "■ 주의: JSON 형식이 올바르지 않으면 기본값이 적용됩니다.",
+                    "Control feature toggles via feature_flags.json.\n"
+                    "Loaded on bot startup and overrides EngineConfig booleans.\n\n"
+                    "■ File location: (bot root)/feature_flags.json\n\n"
+                    "■ Key Flags\n"
+                    "  • auto_tune_enabled: AutoTuner v2 (default ON)\n"
+                    "  • maker_first_enabled: Maker-first entry (default ON)\n"
+                    "  • kpi_tracker_enabled: KPI dashboard tracking (default ON)\n"
+                    "  • execution_quality_tracking: Per-symbol execution quality (default ON)\n"
+                    "  • neural_scorer_enabled: Neural Scorer (default OFF)\n"
+                    "  • consensus_scoring_enabled: 3-Party Consensus (default OFF)\n"
+                    "  • neural_v4_enabled: Neural v4 scorer (default OFF)\n\n"
+                    "■ Usage\n"
+                    "  If a feature causes issues, set its flag to false and restart.\n"
+                    "  Instant safe-mode without code changes.\n\n"
+                    "■ Note: If JSON is malformed, defaults are used automatically."
+                ),
+            ),
+            (
+                "exec_quality",
+                _t("Execution Quality Engine", "Execution Quality Engine"),
+                _t(
+                    "심볼별 maker-first 실행 품질을 추적하고 자동 미세조정합니다.\n\n"
+                    "■ 심볼별 추적 항목\n"
+                    "  • maker 시도 횟수 / maker 체결 횟수 / taker 전환 횟수\n"
+                    "  • GTX(-5022) 거절 횟수\n"
+                    "  • 체결 시간 p50/p90 (ms)\n"
+                    "  • 슬리피지 중앙값 (bps)\n\n"
+                    "■ 자동 미세조정 (5분마다)\n"
+                    "  • maker 체결률 < 40%인 심볼:\n"
+                    "    → offset_bps +0.3 (최대 5.0), timeout_ms +500 (최대 8000)\n"
+                    "  • maker 체결률 > 80%인 심볼:\n"
+                    "    → offset_bps -0.15 (최소 0.5) — 비용 절약\n"
+                    "  • GTX 거절률 > 30%:\n"
+                    "    → offset_bps 추가 확대\n\n"
+                    "■ 효과\n"
+                    "  수수료가 PnL을 집어삼키는 구조를 심볼 단위로 완화합니다.\n"
+                    "  maker 체결률이 높아질수록 진입 수수료가 0.05% → 0.02%로 절감됩니다.\n\n"
+                    "■ 비활성화: feature_flags.json에서 execution_quality_tracking: false",
+                    "Tracks per-symbol maker-first execution quality and auto-adjusts params.\n\n"
+                    "■ Per-Symbol Tracking\n"
+                    "  • Maker attempts / Maker fills / Taker fallbacks\n"
+                    "  • GTX (-5022) rejections\n"
+                    "  • Fill time p50/p90 (ms)\n"
+                    "  • Slippage median (bps)\n\n"
+                    "■ Auto-Adjustment (every 5 min)\n"
+                    "  • Symbols with maker fill rate < 40%:\n"
+                    "    → offset_bps +0.3 (max 5.0), timeout_ms +500 (max 8000)\n"
+                    "  • Symbols with maker fill rate > 80%:\n"
+                    "    → offset_bps -0.15 (min 0.5) — cost savings\n"
+                    "  • GTX rejection rate > 30%:\n"
+                    "    → Additional offset widening\n\n"
+                    "■ Impact\n"
+                    "  Reduces fee drag on PnL at the symbol level.\n"
+                    "  Higher maker fill rate = entry fee drops from 0.05% to 0.02%.\n\n"
+                    "■ Disable: set execution_quality_tracking: false in feature_flags.json"
+                ),
+            ),
+            (
+                "consensus",
+                _t("3-Party Consensus (준비)", "3-Party Consensus (Prep)"),
+                _t(
+                    "Rule Engine + Neural Scorer + AutoTuner 3자의 가중 합의 프레임워크입니다.\n"
+                    "현재 기본 비활성 상태 (feature_flags.json에서 consensus_scoring_enabled: false).\n\n"
+                    "■ 구조\n"
+                    "  • Rule Scorer: 기존 필터(변동성/모멘텀/EMA/스프레드)를 0~1 점수로 변환\n"
+                    "  • Neural Adapter: Neural v3의 P(win) 출력 활용 (v4 스텁 준비됨)\n"
+                    "  • AutoTuner Adapter: confidence + 레짐-방향 일치도 반영\n\n"
+                    "■ 레짐별 가중치\n"
+                    "  • 기본:  Rule 40% / Neural 35% / Tuner 25%\n"
+                    "  • Trend: Rule 30% / Neural 50% / Tuner 20%\n"
+                    "  • Chop:  Rule 50% / Neural 25% / Tuner 25%\n\n"
+                    "■ 결정 임계값: 가중 평균 ≥ 55%이면 진입 허용\n\n"
+                    "■ 활성화 방법\n"
+                    "  feature_flags.json에서 consensus_scoring_enabled: true로 변경 후 재시작",
+                    "Weighted consensus framework: Rule Engine + Neural Scorer + AutoTuner.\n"
+                    "Currently disabled by default (consensus_scoring_enabled: false).\n\n"
+                    "■ Architecture\n"
+                    "  • Rule Scorer: converts existing filters (volatility/momentum/EMA/spread) to 0~1 score\n"
+                    "  • Neural Adapter: uses Neural v3 P(win) output (v4 stub ready)\n"
+                    "  • AutoTuner Adapter: confidence + regime-direction alignment\n\n"
+                    "■ Regime Weights\n"
+                    "  • Default: Rule 40% / Neural 35% / Tuner 25%\n"
+                    "  • Trend:   Rule 30% / Neural 50% / Tuner 20%\n"
+                    "  • Chop:    Rule 50% / Neural 25% / Tuner 25%\n\n"
+                    "■ Decision Threshold: weighted avg ≥ 55% → entry allowed\n\n"
+                    "■ Activation\n"
+                    "  Set consensus_scoring_enabled: true in feature_flags.json and restart"
                 ),
             ),
             (
@@ -1861,12 +2053,18 @@ class BotGUI:
             "rr_ratio":         ("손익비 R:R",         "Win/Loss Ratio",  "—"),
             "expectancy":       ("거래당 기댓값",      "Expectancy",      "+0.00 USDT"),
             "max_consec_loss":  ("최대 연속 손실",     "Max Consec. Loss","—"),
+            # ── KPI 카드 ──
+            "kpi_tca":          ("TCA (bps)",          "TCA (bps)",       "— bps"),
+            "kpi_maker_rate":   ("Maker 체결률",       "Maker Fill Rate", "— %"),
+            "kpi_edge":         ("Edge After Fee",     "Edge After Fee",  "— %"),
+            "kpi_regime":       ("레짐 안정성",        "Regime Stability", "—"),
         }
         # 드롭다운 표시 순서
         SWITCHABLE_ORDER = [
             "unrealized_total", "filter_pass_rate", "top_symbol",
             "pnl_15", "pnl_60", "pnl_12h", "pnl_24h",
             "rr_ratio", "expectancy", "max_consec_loss",
+            "kpi_tca", "kpi_maker_rate", "kpi_edge", "kpi_regime",
         ]
 
         stats_config = [
@@ -2061,6 +2259,8 @@ class BotGUI:
                 self._update_expectancy_card()
             elif mode_key == "max_consec_loss":
                 self._update_max_consec_loss_card()
+            elif mode_key in ("kpi_tca", "kpi_maker_rate", "kpi_edge", "kpi_regime"):
+                self._update_kpi_card(mode_key)
         except Exception:
             pass
 
@@ -2452,14 +2652,14 @@ class BotGUI:
     def _format_trail_status(self, roi_percent: float) -> str:
         if not self.settings_data.get("enable_atr_trailing_stop", True):
             return "OFF"
-        trigger = self._percent_value(self.settings_data.get("trail_activate_pnl_pct", 0.0))
-        mult = float(self.settings_data.get("trail_atr_mult", 3.0) or 0.0)
+        trigger = self._percent_value(self.settings_data.get("trail_activate_pnl_pct", 0.005))
+        mult = float(self.settings_data.get("trail_atr_mult", 1.7) or 0.0)
         if trigger <= 0 or roi_percent >= trigger:
             return f"ARMED ({mult:.1f}x)"
         return self._t("trail_waiting_pct", "Wait ≥ {pct:.0f}%").format(pct=trigger)
 
     def _format_progress_status(self, roi_percent: float) -> str:
-        if not self.settings_data.get("enable_progress_stop", True):
+        if not self.settings_data.get("enable_progress_stop", False):
             return "OFF"
         min_pnl = self._percent_value(self.settings_data.get("progress_stop_min_pnl_pct", 0.0))
         stale = int(self.settings_data.get("progress_stop_no_new_high_sec", 1800) or 0)
@@ -2955,35 +3155,42 @@ class BotGUI:
                 if not is_excel:
                     import csv
                     with open(file_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
-                        fieldnames = ['시각', '심볼', '방향', '수량', '진입가', '청산가', 
-                                     '손익(수수료 전)', '수수료', '순손익(수수료 후)', 
-                                     'ROI(%)', '레버리지', '청산사유', 
-                                     '수수료타입', '환경']
+                        if _en:
+                            fieldnames = ['Time', 'Symbol', 'Side', 'Qty', 'Entry', 'Exit',
+                                         'Gross PnL', 'Fee', 'Net PnL',
+                                         'ROI(%)', 'Leverage', 'Trigger',
+                                         'Fee Type', 'Env']
+                        else:
+                            fieldnames = ['시각', '심볼', '방향', '수량', '진입가', '청산가',
+                                         '손익(수수료 전)', '수수료', '순손익(수수료 후)',
+                                         'ROI(%)', '레버리지', '청산사유',
+                                         '수수료타입', '환경']
                         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                         writer.writeheader()
-                        
+
+                        _k = fieldnames  # shorthand for column keys
                         for t in trades:
                             ts = datetime.fromtimestamp(t.get('ts', 0)).strftime('%Y-%m-%d %H:%M:%S')
                             # [PATCH-15] pnl은 이미 수수료 차감된 순손익임
                             net_pnl = t.get('pnl', 0)
                             fee = t.get('fee_amount', 0)
-                            gross_pnl = net_pnl + fee  # 수수료 전 = 순손익 + 수수료
+                            gross_pnl = net_pnl + fee
 
                             writer.writerow({
-                                '시각': ts,
-                                '심볼': t.get('symbol', ''),
-                                '방향': t.get('side', ''),
-                                '수량': t.get('quantity', 0),
-                                '진입가': t.get('entry_price', 0),
-                                '청산가': t.get('exit_price', 0),
-                                '손익(수수료 전)': f"{gross_pnl:.4f}",
-                                '수수료': f"{fee:.4f}",
-                                '순손익(수수료 후)': f"{net_pnl:.4f}",
-                                'ROI(%)': f"{t.get('roi_pct', 0):.2f}",
-                                '레버리지': f"{t.get('leverage', 0):.1f}x",
-                                '청산사유': t.get('trigger', ''),
-                                '수수료타입': t.get('fee_type', ''),
-                                '환경': t.get('env', 'live')
+                                _k[0]: ts,
+                                _k[1]: t.get('symbol', ''),
+                                _k[2]: t.get('side', ''),
+                                _k[3]: t.get('quantity', 0),
+                                _k[4]: t.get('entry_price', 0),
+                                _k[5]: t.get('exit_price', 0),
+                                _k[6]: f"{gross_pnl:.4f}",
+                                _k[7]: f"{fee:.4f}",
+                                _k[8]: f"{net_pnl:.4f}",
+                                _k[9]: f"{t.get('roi_pct', 0):.2f}",
+                                _k[10]: f"{t.get('leverage', 0):.1f}x",
+                                _k[11]: t.get('trigger', ''),
+                                _k[12]: t.get('fee_type', ''),
+                                _k[13]: t.get('env', 'live')
                             })
                     
                     tk.messagebox.showinfo(
@@ -3009,13 +3216,19 @@ class BotGUI:
                     
                     wb = openpyxl.Workbook()
                     ws = wb.active
-                    ws.title = "거래기록"
-                    
+                    ws.title = "Trade History" if _en else "거래기록"
+
                     # 헤더
-                    headers = ['시각', '심볼', '방향', '수량', '진입가', '청산가', 
-                              '손익(수수료 전)', '수수료', '순손익(수수료 후)', 
-                              'ROI(%)', '레버리지', '청산사유', 
-                              '수수료타입', '환경']
+                    if _en:
+                        headers = ['Time', 'Symbol', 'Side', 'Qty', 'Entry', 'Exit',
+                                  'Gross PnL', 'Fee', 'Net PnL',
+                                  'ROI(%)', 'Leverage', 'Trigger',
+                                  'Fee Type', 'Env']
+                    else:
+                        headers = ['시각', '심볼', '방향', '수량', '진입가', '청산가',
+                                  '손익(수수료 전)', '수수료', '순손익(수수료 후)',
+                                  'ROI(%)', '레버리지', '청산사유',
+                                  '수수료타입', '환경']
                     ws.append(headers)
                     
                     # 헤더 스타일
@@ -4213,18 +4426,18 @@ class BotGUI:
 
         _is_ko = (self.language == "ko")
         _at_features = [
-            ("📊", "모멘텀 & 변동성 자동 조절" if _is_ko else "Auto-adjust momentum & volatility",
-             "시장 상태에 따라 진입 모멘텀/변동성 임계값을 실시간 조정합니다." if _is_ko
-             else "Dynamically tunes entry momentum/volatility thresholds based on market conditions."),
-            ("⚖️", "포지션 크기 & 레버리지 범위" if _is_ko else "Position size & leverage range",
-             "승률과 변동성에 따라 포지션 비중과 레버리지 min/max를 자동 조정합니다." if _is_ko
-             else "Adjusts position % and leverage min/max based on win rate and volatility."),
-            ("🛡️", "손절폭 & 쿨다운" if _is_ko else "Stop-loss & cooldown",
-             "연속 손실 시 손절 한도를 조이고, 쿨다운 주기로 과매매를 방지합니다." if _is_ko
-             else "Tightens stop-loss after consecutive losses and enforces cooldown to prevent overtrading."),
-            ("🔄", "Shadow → Apply 검증" if _is_ko else "Shadow → Apply validation",
-             "새 파라미터를 Shadow 테스트 후 성과가 좋을 때만 실제 적용합니다." if _is_ko
-             else "Shadow-tests new parameters and only applies them when they prove profitable."),
+            ("📊", "EMA 수렴 기반 파라미터 조절" if _is_ko else "EMA convergence parameter tuning",
+             "모멘텀·변동성 임계값을 EMA 수렴 방식으로 부드럽게 조정합니다. 급격한 점프 없이 안정적으로 수렴합니다." if _is_ko
+             else "Smoothly adjusts momentum/volatility thresholds via EMA convergence — no sudden jumps."),
+            ("🌐", "레짐 기반 목표값 (추세↑/추세↓/횡보)" if _is_ko else "Regime-aware targets (trend-up/down/chop)",
+             "시장 레짐을 자동 분류하고, 레짐별 최적 목표값을 설정합니다. 레짐 전환 시 최소 3분 유지·시간당 3회 제한." if _is_ko
+             else "Auto-classifies market regime and sets optimal targets per regime. Min 3-min hold, max 3 switches/hour."),
+            ("⚖️", "포지션·레버리지·리스크 자동 조절" if _is_ko else "Position, leverage & risk auto-adjust",
+             "PnL·TCA·노이즈 지표를 기반으로 포지션 비중, 레버리지, 리스크 바이어스를 조정합니다." if _is_ko
+             else "Adjusts position %, leverage range and risk bias based on PnL, TCA and noise metrics."),
+            ("🔄", "Shadow-lite 검증 & 5분 적용 주기" if _is_ko else "Shadow-lite validation & 5-min apply cycle",
+             "변동폭이 큰 변경은 1사이클 지연 후 적용. 5분마다 적용하여 과잉 튜닝을 방지합니다." if _is_ko
+             else "Large changes deferred by 1 cycle. Applied every 5 min to prevent over-tuning."),
         ]
         for _icon, _title, _desc in _at_features:
             _feat_row = tk.Frame(_at_info_frame, bg="#171b26")
@@ -4480,7 +4693,7 @@ class BotGUI:
         pe_var = tk.BooleanVar(value=bool(self.settings_data.get("enable_profit_exit_layer", True)))
         partial_tp_var = tk.BooleanVar(value=bool(self.settings_data.get("enable_partial_take_profit", True)))
         trail_tp_var = tk.BooleanVar(value=bool(self.settings_data.get("enable_atr_trailing_stop", True)))
-        progress_var = tk.BooleanVar(value=bool(self.settings_data.get("enable_progress_stop", True)))
+        progress_var = tk.BooleanVar(value=bool(self.settings_data.get("enable_progress_stop", False)))
         build_image_toggle(profit_panel, self._t("profit_exit_layer_toggle","Enable Profit Exit Layer"), pe_var)
         tk.Label(profit_panel, text=self._t("profit_layer_hint"), bg="#10131d", fg="#7f8ab3", font=("Malgun Gothic", 9), anchor="w", wraplength=560, justify="left").pack(fill="x", padx=36, pady=(0, 6))
         build_image_toggle(profit_panel, self._t("partial_tp_label"), partial_tp_var)
@@ -4510,8 +4723,8 @@ class BotGUI:
         tk.Label(atr_frame, text=self._t("atr_activate_pct"), bg="#10131d", fg="#8e96b8").grid(row=2, column=2, padx=(0, 8), sticky="w")
         tk.Label(atr_frame, text=self._t("recalc_sec","Recalc (s)"), bg="#10131d", fg="#8e96b8").grid(row=2, column=3, padx=(0, 8), sticky="w")
         trail_period_var = tk.IntVar(value=int(self.settings_data.get("trail_atr_period", 22)))
-        trail_mult_var = tk.DoubleVar(value=float(self.settings_data.get("trail_atr_mult", 3.0)))
-        trail_activate_var = tk.DoubleVar(value=float(self.settings_data.get("trail_activate_pnl_pct", 0.20) * 100 if abs(self.settings_data.get("trail_activate_pnl_pct", 0.20)) <= 1 else self.settings_data.get("trail_activate_pnl_pct", 0.20)))
+        trail_mult_var = tk.DoubleVar(value=float(self.settings_data.get("trail_atr_mult", 1.7)))
+        trail_activate_var = tk.DoubleVar(value=float(self.settings_data.get("trail_activate_pnl_pct", 0.005) * 100 if abs(self.settings_data.get("trail_activate_pnl_pct", 0.005)) <= 1 else self.settings_data.get("trail_activate_pnl_pct", 0.005)))
         trail_interval_var = tk.IntVar(value=int(self.settings_data.get("trail_recalc_interval_sec", 5)))
         _make_dark_entry(atr_frame, trail_period_var, row=3, column=0, width=10)
         _make_dark_entry(atr_frame, trail_mult_var, row=3, column=1, width=10)
@@ -4842,8 +5055,8 @@ class BotGUI:
         watch_limit_ui_var = tk.IntVar(value=int(self.settings_data.get("watch_limit", 10)))  # [PATCH-14] 20→10
         max_open_ui_var = tk.IntVar(value=int(self.settings_data.get("max_open_symbols", 10)))  # [PATCH-14] 5→10
         vol_var = tk.DoubleVar(value=float(self.settings_data.get("volatility_min", 0.002)))
-        mom_long_var = tk.DoubleVar(value=float(self.settings_data.get("momentum_min_long", 0.002)))
-        mom_short_var = tk.DoubleVar(value=float(self.settings_data.get("momentum_min_short", -0.002)))
+        mom_long_var = tk.DoubleVar(value=float(self.settings_data.get("momentum_min_long", 0.003)))
+        mom_short_var = tk.DoubleVar(value=float(self.settings_data.get("momentum_min_short", -0.004)))
 
         # ── 심볼 감시/진입 수 ────────────────────────────────────────────
         _sym_grid = tk.Frame(filter_panel, bg=panel_bg)
@@ -5139,7 +5352,7 @@ class BotGUI:
             self.settings_data["enable_progress_stop"] = bool(progress_var.get())
             self.settings_data["partial_tp_levels"] = partial_levels
             self.settings_data["trail_atr_period"] = max(1, int(trail_period_var.get() or 22))
-            self.settings_data["trail_atr_mult"] = max(0.1, float(trail_mult_var.get() or 3.0))
+            self.settings_data["trail_atr_mult"] = max(0.1, float(trail_mult_var.get() or 1.7))
             self.settings_data["trail_activate_pnl_pct"] = self._normalize_ratio_input(trail_activate_var.get())
             self.settings_data["trail_recalc_interval_sec"] = max(1, int(trail_interval_var.get() or 5))
             self.settings_data["progress_stop_lookback_sec"] = max(60, int(prog_look_var.get() or 1800))
@@ -7016,10 +7229,10 @@ class BotGUI:
         _tune_mode = str(self.settings_data.get("auto_tune_mode", "balanced"))
         _pos_bounds = {"aggressive": (0.03, 0.18), "balanced": (0.02, 0.12), "conservative": (0.02, 0.08)}
         _lo, _hi = _pos_bounds.get(_tune_mode, (0.02, 0.12))
-        if self.settings_data.get("auto_tune_enabled", False) and _raw_pos_pct < _lo:
+        if self.settings_data.get("auto_tune_enabled", True) and _raw_pos_pct < _lo:
             logging.warning(f"[PATCH-4] position_pct {_raw_pos_pct:.4f}이 {_tune_mode} 모드 최소값 {_lo:.3f}보다 낮아 {_lo:.3f}로 조정합니다.")
             _raw_pos_pct = _lo
-        elif self.settings_data.get("auto_tune_enabled", False) and _raw_pos_pct > _hi:
+        elif self.settings_data.get("auto_tune_enabled", True) and _raw_pos_pct > _hi:
             logging.warning(f"[PATCH-4] position_pct {_raw_pos_pct:.4f}이 {_tune_mode} 모드 최대값 {_hi:.3f}을 초과하여 {_hi:.3f}로 조정합니다.")
             _raw_pos_pct = _hi
 
@@ -7029,10 +7242,10 @@ class BotGUI:
             leverage_min=int(self.settings_data.get("leverage_min", 1)),
             leverage_max=int(self.settings_data.get("leverage_max", 10)),
             volatility_min=float(self.settings_data.get("volatility_min", 0.002)),
-            momentum_min_long=float(self.settings_data.get("momentum_min_long", 0.002)),
-            momentum_min_short=float(self.settings_data.get("momentum_min_short", -0.002)),
-            momentum_min=float(self.settings_data.get("momentum_min_long", 0.002)),
-            auto_tune_enabled=bool(self.settings_data.get("auto_tune_enabled", False)),
+            momentum_min_long=float(self.settings_data.get("momentum_min_long", 0.003)),
+            momentum_min_short=float(self.settings_data.get("momentum_min_short", -0.004)),
+            momentum_min=float(self.settings_data.get("momentum_min_long", 0.003)),
+            auto_tune_enabled=bool(self.settings_data.get("auto_tune_enabled", True)),
             auto_tune_mode=str(self.settings_data.get("auto_tune_mode", "balanced")),
             total_risk_budget=float(self.settings_data.get("position_pct", 0.06)),
             watch_limit=int(self.settings_data.get("watch_limit", 10)),
@@ -7057,10 +7270,10 @@ class BotGUI:
             enable_profit_exit_layer=bool(self.settings_data.get("enable_profit_exit_layer", True)),
             enable_partial_take_profit=bool(self.settings_data.get("enable_partial_take_profit", True)),
             enable_atr_trailing_stop=bool(self.settings_data.get("enable_atr_trailing_stop", True)),
-            enable_progress_stop=bool(self.settings_data.get("enable_progress_stop", True)),
+            enable_progress_stop=bool(self.settings_data.get("enable_progress_stop", False)),  # [PATCH-16] 비활성화
             trail_atr_period=int(self.settings_data.get("trail_atr_period", 22)),
-            trail_atr_mult=float(self.settings_data.get("trail_atr_mult", 3.0)),
-            trail_activate_pnl_pct=float(self.settings_data.get("trail_activate_pnl_pct", 0.03)),
+            trail_atr_mult=float(self.settings_data.get("trail_atr_mult", 1.7)),
+            trail_activate_pnl_pct=float(self.settings_data.get("trail_activate_pnl_pct", 0.005)),  # [P1-C2] 0.008→0.005
             trail_use_highest_since_entry=bool(self.settings_data.get("trail_use_highest_since_entry", True)),
             trail_recalc_interval_sec=int(self.settings_data.get("trail_recalc_interval_sec", 5)),
             progress_stop_lookback_sec=int(self.settings_data.get("progress_stop_lookback_sec", 600)),
@@ -7070,7 +7283,8 @@ class BotGUI:
             progress_stop_action=str(self.settings_data.get("progress_stop_action", "partial_or_full")),
             # [추가] ATR 리스크 사이징: 포지션당 계좌의 entry_risk_pct% 이상 손실 방지
             atr_risk_sizing_enabled=bool(self.settings_data.get("atr_risk_sizing_enabled", True)),
-            entry_risk_pct=float(self.settings_data.get("entry_risk_pct", 0.01)),
+            entry_risk_pct=float(self.settings_data.get("entry_risk_pct", 0.01)),  # [PATCH-18] 0.1→0.01
+            tp_min_roi_pct=float(self.settings_data.get("tp_min_roi_pct", 0.02)),  # [PATCH-18] 0.1→0.02
             min_margin_usdt=max(1.0, float(self.settings_data.get("min_margin_usdt", 1.0))),  # [PATCH-6f] 최소 1.0 USDT 보장
             # [추가] RSI 과열 필터 (틱 기반 모멘텀 상한): 추세 끝자락 진입 차단
             rsi_filter_enabled=bool(self.settings_data.get("rsi_filter_enabled", False)),
@@ -7078,7 +7292,7 @@ class BotGUI:
             rsi_oversold=float(self.settings_data.get("rsi_oversold", 25.0)),
             # [추가] 복합 신호 스코어링: 모멘텀·거래량서지·MTF 가중 합산으로 신호 품질 향상
             composite_signal_enabled=bool(self.settings_data.get("composite_signal_enabled", True)),
-            composite_min_score=float(self.settings_data.get("composite_min_score", 1.2)),
+            composite_min_score=float(self.settings_data.get("composite_min_score", 0.80)),
             # [추가] Breakeven stop: 첫 TP 발동 후 손익분기점으로 스탑 자동 이동
             breakeven_stop_enabled=bool(self.settings_data.get("breakeven_stop_enabled", True)),
             breakeven_buffer_pct=float(self.settings_data.get("breakeven_buffer_pct", 0.001)),
@@ -7099,11 +7313,11 @@ class BotGUI:
             time_stop_seconds=int(self.settings_data.get("time_stop_seconds", 1800)),
             signal_decay_threshold=float(self.settings_data.get("signal_decay_threshold", 0.25)),
             signal_decay_min_profit=float(self.settings_data.get("signal_decay_min_profit", 2.0)),
-            sl_atr_mult=float(self.settings_data.get("sl_atr_mult", 0.7)),
+            sl_atr_mult=float(self.settings_data.get("sl_atr_mult", 1.5)),  # [P1-C2] 2.0→1.5
             partial_tp_levels=self.settings_data.get("partial_tp_levels", None) or [
-                {"r": 0.7, "close_frac": 0.35},
-                {"r": 1.2, "close_frac": 0.35},
-                {"r": 2.0, "close_frac": 1.00},
+                {"r": 1.0, "close_frac": 0.30},
+                {"r": 1.5, "close_frac": 0.30},
+                {"r": 2.5, "close_frac": 0.40},
             ],
             # ── Maker-first / 워치리스트 다양성 ──────────────────────────────────
             maker_first_enabled=bool(self.settings_data.get("maker_first_enabled", True)),
@@ -7116,8 +7330,8 @@ class BotGUI:
             consent_verified=bool(self.risk_acknowledged),
             # C2/C3/E: commercial safety config
             startup_grace_sec=int(self.settings_data.get("startup_grace_sec", 60)),
-            entry_slippage_cap_bps=float(self.settings_data.get("entry_slippage_cap_bps", 20.0)),
-            max_consecutive_rollbacks=int(self.settings_data.get("max_consecutive_rollbacks", 5)),
+            entry_slippage_cap_bps=float(self.settings_data.get("entry_slippage_cap_bps", 12.0)),  # [PATCH-10] 20→12
+            max_consecutive_rollbacks=int(self.settings_data.get("max_consecutive_rollbacks", 3)),  # 5→3
         )
 
     def _get_api_credentials(self):
@@ -7274,11 +7488,30 @@ class BotGUI:
                 if success_cb:
                     self.root.after(0, lambda: success_cb(result))
             except Exception as exc:
+                # Auto-recover from -1021 timestamp error
+                _code = getattr(exc, "code", None)
+                if _code == -1021:
+                    self._append_log("[WARN] Timestamp sync error (-1021), re-syncing...")
+                    self._run_async(self._resync_gui_client_time(), fail_msg=None)
+                    return
                 if fail_msg:
                     err_text = f"{fail_msg}\n{exc}"
                     self.root.after(0, lambda e=err_text: self._show_error(self._t("error_title","Error"), e))
 
         future.add_done_callback(callback)
+
+    async def _resync_gui_client_time(self):
+        """Re-sync GUI's Binance client timestamp offset."""
+        from binance_futures_bot1_1.main import current_client
+        if current_client:
+            try:
+                server_time = await current_client.futures_time()
+                server_ts = int(server_time["serverTime"])
+                local_ts = int(time.time() * 1000)
+                current_client.timestamp_offset = server_ts - local_ts
+                self._append_log(f"[INFO] Time re-synced: offset={current_client.timestamp_offset}ms")
+            except Exception as e:
+                self._append_log(f"[WARN] Time re-sync failed: {e}")
 
     # ------------------------------------------------------------------
     def _reset_runtime_stats(self, timestamp=None):
@@ -7288,8 +7521,58 @@ class BotGUI:
         self._set_stat_value("trade_count", "0")
         self._set_stat_value("win_rate", "0%")
 
+    def _validate_critical_config(self) -> str:
+        """부팅 시 거래 금지 검증(Fail-Fast) — 치명적 설정 오류 탐지.
+        Returns: 오류 메시지 (없으면 빈 문자열)"""
+        errors = []
+        s = self.settings_data
+        # 1) partial_tp_levels 비어있으면 익절 불가 → 거래 금지
+        tp = s.get("partial_tp_levels")
+        if not tp or not isinstance(tp, list) or len(tp) == 0:
+            errors.append("partial_tp_levels is empty — no profit taking possible")
+        else:
+            frac_sum = sum(float(lv.get("close_frac", 0)) for lv in tp)
+            if frac_sum < 0.5 or frac_sum > 1.5:
+                errors.append(f"partial_tp_levels close_frac sum={frac_sum:.2f} (expected 0.5~1.5)")
+        # 2) trail_activate_pnl_pct 단위 오류 탐지 (ratio 기준 0.0005~0.03)
+        trail = float(s.get("trail_activate_pnl_pct", 0.005))  # [P1-C2] default 0.005
+        if trail < 0.0005 or trail > 0.03:
+            errors.append(f"trail_activate_pnl_pct={trail} out of safe range [0.0005, 0.03] — unit error?")
+        # 3) position_pct 과도한 리스크 (Expert Mode 아닌 경우)
+        pos = float(s.get("position_pct", 0.06))
+        expert = bool(s.get("expert_mode_enabled", False))
+        if not expert and pos > 0.15:
+            errors.append(f"position_pct={pos:.2f} exceeds safe limit 0.15 (Expert Mode off)")
+        # 4) maker_first가 켜져있는데 maker_entry_use_taker=True면 무의미
+        if bool(s.get("maker_first_enabled", True)) and bool(s.get("maker_entry_use_taker", False)):
+            errors.append("maker_first_enabled=true but maker_entry_use_taker=true (bypasses maker)")
+        # 5) entry_risk_pct 범위 체크
+        erp = float(s.get("entry_risk_pct", 0.01))
+        if erp > 0.05:
+            errors.append(f"entry_risk_pct={erp} too high (max safe: 0.05)")
+        # 6) maker_first_timeout_ms 범위 (500~5000ms)
+        mft = int(s.get("maker_first_timeout_ms", 2000))
+        if bool(s.get("maker_first_enabled", True)):
+            if mft < 500:
+                errors.append(f"maker_first_timeout_ms={mft} too short (<500ms) — maker will always fail")
+            elif mft > 5000:
+                errors.append(f"maker_first_timeout_ms={mft} too long (>5000ms) — entry delay risk")
+        # 7) entry_risk_pct + kelly + atr 동시 활성 시 과대 리스크 경고
+        if erp > 0.02 and bool(s.get("kelly_sizing_enabled", False)) and bool(s.get("atr_risk_sizing_enabled", False)):
+            errors.append(f"entry_risk_pct={erp} with Kelly+ATR sizing both enabled — risk amplification")
+        return "\n".join(errors)
+
     def start_engine(self):
         if self.engine_running:
+            return
+        # ── Config Validation Gate (P0-1) ──
+        _cfg_errors = self._validate_critical_config()
+        if _cfg_errors:
+            self._append_log(f"[CRITICAL] Config validation failed:\n{_cfg_errors}")
+            _msg = ("Critical config error detected — trading blocked.\n\n"
+                    f"{_cfg_errors}\n\n"
+                    "Fix settings or reset to defaults.")
+            self._show_error(self._t("error_title", "Error"), _msg)
             return
         # 방어 코드: 잔여 grab이 있으면 해제하여 버튼 클릭 불가 현상 방지
         try:
@@ -8597,8 +8880,12 @@ class BotGUI:
                     est_fee = 0.0
                 _pnl_net = float(pos["unRealizedProfit"]) - est_fee
                 _net_sign = "+" if _pnl_net > 0 else ""
-                _fee_part = f" | 수수료-{est_fee:.3f}" if est_fee >= 0.001 else ""
-                pnl_text = f"{pos['unRealizedProfit']:.2f} ({pos['roiPercent']:.2f}%){_fee_part} → 순{_net_sign}{_pnl_net:.2f} USDT"
+                if self.language == "ko":
+                    _fee_part = f" | 수수료-{est_fee:.3f}" if est_fee >= 0.001 else ""
+                    pnl_text = f"{pos['unRealizedProfit']:.2f} ({pos['roiPercent']:.2f}%){_fee_part} → 순{_net_sign}{_pnl_net:.2f} USDT"
+                else:
+                    _fee_part = f" | Fee-{est_fee:.3f}" if est_fee >= 0.001 else ""
+                    pnl_text = f"{pos['unRealizedProfit']:.2f} ({pos['roiPercent']:.2f}%){_fee_part} → Net{_net_sign}{_pnl_net:.2f} USDT"
                 margin_val = float(pos.get("marginValue", 0.0))
                 tags = ["profit" if pos["unRealizedProfit"] >= 0 else "loss", "even" if idx % 2 == 0 else "odd"]
                 highlight = self.manual_highlight.get(symbol)
@@ -8655,7 +8942,10 @@ class BotGUI:
                     if _sub:
                         try:
                             if abs(_total_fee) >= 0.001:
-                                _sub.config(text=f"수수료 -{_total_fee:.3f} USDT 차감 후")
+                                _fee_txt = (f"수수료 -{_total_fee:.3f} USDT 차감 후"
+                                            if self.language == "ko" else
+                                            f"Fee -{_total_fee:.3f} USDT deducted")
+                                _sub.config(text=_fee_txt)
                             else:
                                 _sub.config(text="")
                         except Exception:
@@ -8903,9 +9193,9 @@ class BotGUI:
                 partial_text = f"Partial: {self._format_partial_levels_for_display(partial_levels)}"
         trail_text = "Trail: OFF"
         if self.settings_data.get("enable_atr_trailing_stop", True):
-            trail_text = f"Trail: >= {self._format_percent_display(self.settings_data.get('trail_activate_pnl_pct', 0.0))} ATR x {self.settings_data.get('trail_atr_mult', 3.0):.1f}"
+            trail_text = f"Trail: >= {self._format_percent_display(self.settings_data.get('trail_activate_pnl_pct', 0.005))} ATR x {self.settings_data.get('trail_atr_mult', 1.7):.1f}"
         progress_text = "Progress: OFF"
-        if self.settings_data.get("enable_progress_stop", True):
+        if self.settings_data.get("enable_progress_stop", False):
             drawdown = self._format_percent_display(self.settings_data.get('progress_stop_drawdown_from_mfe', 0.15))
             stale = int(self.settings_data.get('progress_stop_no_new_high_sec', 1800))
             progress_text = f"Progress: stale {stale}s / DD {drawdown}"
@@ -9259,7 +9549,7 @@ class BotGUI:
         # settings.json에서도 기본값으로 덮어씀
         _defaults_to_restore = {
             "momentum_min_long":  0.003,
-            "momentum_min_short": -0.003,
+            "momentum_min_short": -0.004,
             "volatility_min":     0.001,
             "leverage_min":       1,   # [PATCH-14] 5→1
             "leverage_max":       10,  # [PATCH-14] 20→10
@@ -9273,7 +9563,7 @@ class BotGUI:
                 try:
                     _cur_f = float(_cur)
                     _def_f = float(_default)
-                    if _key == "momentum_min_long" and _cur_f > 0.005:
+                    if _key == "momentum_min_long" and _cur_f > 0.004:
                         self.settings_data[_key] = _default
                         _restored.append(f"{_key}: {_cur_f:.4f}→{_default}")
                     elif _key == "leverage_min" and _cur_f > 20:
@@ -9592,10 +9882,10 @@ class BotGUI:
             try:
                 if _banner.winfo_exists():
                     _mom_val = current.get("momentum_min_long", 0.0) or 0.0
-                    _baseline_mom = 0.005  # 기본 baseline
+                    _baseline_mom = 0.003  # [v2] 기본 baseline 0.005→0.003
                     _regime_cur = (hyst.get("current_regime") or "").lower()
                     _warn_msg = ""
-                    if float(_mom_val) >= 0.007:
+                    if float(_mom_val) >= 0.005:
                         if self.language == "ko":
                             _warn_msg = (
                                 f"⚠️  진입 차단 중 — 모멘텀 임계값이 {float(_mom_val):.4f}로 높습니다 "
@@ -9608,7 +9898,7 @@ class BotGUI:
                                 f"(regime: {_regime_cur.upper()}). Most symbols fail this filter. "
                                 f"Consider Auto-Tune Reset and restart."
                             )
-                    elif float(_mom_val) >= 0.006:
+                    elif float(_mom_val) >= 0.004:
                         if self.language == "ko":
                             _warn_msg = f"⚡ 모멘텀 임계값 {float(_mom_val):.4f} — 진입 기회가 제한됩니다."
                         else:
@@ -9616,8 +9906,8 @@ class BotGUI:
                     if _warn_msg:
                         _banner.configure(
                             text=_warn_msg,
-                            bg="#3a1a00" if float(_mom_val) >= 0.007 else "#1a2a0a",
-                            fg="#ffaa44" if float(_mom_val) >= 0.007 else "#aaff88",
+                            bg="#3a1a00" if float(_mom_val) >= 0.005 else "#1a2a0a",
+                            fg="#ffaa44" if float(_mom_val) >= 0.005 else "#aaff88",
                         )
                         if not getattr(self, "_trade_block_banner_visible", False):
                             _banner.pack(fill="x", padx=18, pady=(0, 8), before=_banner.master.winfo_children()[1] if len(_banner.master.winfo_children()) > 1 else None)
@@ -9876,6 +10166,13 @@ class BotGUI:
                 self._update_max_consec_loss_card()
             except Exception:
                 pass
+        # ── KPI 카드 갱신 ──
+        _kpi_keys = {"kpi_tca", "kpi_maker_rate", "kpi_edge", "kpi_regime"}
+        for _kk in _kpi_keys & _active:
+            try:
+                self._update_kpi_card(_kk)
+            except Exception:
+                pass
 
     def _calc_unrealized_net(self) -> float:
         """현재 포지션 미실현 손익에서 예상 청산 수수료만 차감.
@@ -10012,6 +10309,61 @@ class BotGUI:
             lbl.config(text=f"{pct:.1f}%  {passed}/{inp}", fg=color)
         else:
             lbl.config(text="— %", fg="#8892a4")
+
+    def _read_last_kpi(self) -> dict:
+        """metrics.jsonl에서 최신 KPI 데이터 읽기 (kpi + exec_quality 필드)."""
+        try:
+            if not os.path.exists(METRICS_PATH):
+                return {}
+            with open(METRICS_PATH, "r", encoding="utf-8", errors="ignore") as fh:
+                lines = fh.readlines()
+            # 뒤에서부터 kpi 또는 exec_quality 필드가 있는 마지막 라인 찾기
+            for line in reversed(lines[-200:]):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if "kpi" in data or "exec_quality" in data:
+                        return data
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return {}
+
+    def _update_kpi_card(self, mode_key: str):
+        """KPI 카드 업데이트: metrics.jsonl의 최신 kpi/exec_quality 데이터."""
+        lbl = self.stats_labels.get(mode_key)
+        if not lbl:
+            return
+        data = self._read_last_kpi()
+        kpi = data.get("kpi", {})
+        eq = data.get("exec_quality", {})
+
+        try:
+            if mode_key == "kpi_tca":
+                val = kpi.get("tca_bps", 0.0)
+                color = "#2EBD85" if val < 5 else ("#F7C948" if val < 10 else "#F6465D")
+                lbl.config(text=f"{val:.1f} bps", fg=color)
+            elif mode_key == "kpi_maker_rate":
+                val = eq.get("maker_fill_rate", kpi.get("maker_fill_rate", 0.0))
+                color = "#2EBD85" if val >= 60 else ("#F7C948" if val >= 30 else "#F6465D")
+                lbl.config(text=f"{val:.1f}%", fg=color)
+            elif mode_key == "kpi_edge":
+                val = kpi.get("edge_after_fee", 0.0)
+                sign = "+" if val > 0 else ""
+                color = "#2EBD85" if val > 0 else ("#F6465D" if val < 0 else "#ffffff")
+                lbl.config(text=f"{sign}{val:.3f}%", fg=color)
+            elif mode_key == "kpi_regime":
+                regime = kpi.get("regime_switch_rate", 0.0)
+                regime_name = data.get("auto_tune", {}).get("regime", "—")
+                color = "#2EBD85" if regime <= 3 else ("#F7C948" if regime <= 5 else "#F6465D")
+                lbl.config(text=f"{regime_name} ({regime:.1f}/h)", fg=color)
+            else:
+                lbl.config(text="—", fg="#8892a4")
+        except Exception:
+            lbl.config(text="—", fg="#8892a4")
 
     def _update_top_symbol_card(self, trade_rows):
         """최다 거래 심볼 카드 업데이트: trade_history.jsonl 직접 읽기."""
@@ -10830,8 +11182,8 @@ class BotGUI:
 
         base_defaults = {
             "volatility_min":     fresh_settings.get("volatility_min", 0.001),
-            "momentum_min_long":  fresh_settings.get("momentum_min_long", 0.001),
-            "momentum_min_short": fresh_settings.get("momentum_min_short", -0.001),
+            "momentum_min_long":  fresh_settings.get("momentum_min_long", 0.003),
+            "momentum_min_short": fresh_settings.get("momentum_min_short", -0.004),
             "position_pct":       fresh_settings.get("position_pct", 0.06),  # [PATCH-14] 0.05→0.06
             "leverage_min":       fresh_settings.get("leverage_min", 1),
             "leverage_max":       fresh_settings.get("leverage_max", 10),

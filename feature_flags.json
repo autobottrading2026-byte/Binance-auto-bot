@@ -1,0 +1,24 @@
+{
+  "auto_tune_enabled": true,
+  "enable_take_profit": true,
+  "enable_partial_take_profit": true,
+  "enable_atr_trailing_stop": true,
+  "spike_guard_enabled": true,
+  "maker_first_enabled": true,
+  "enable_mtf_ema_confirm": true,
+  "composite_signal_enabled": true,
+  "kelly_sizing_enabled": true,
+  "funding_filter_enabled": true,
+  "enable_signal_decay_exit": false,
+  "enable_time_stop": false,
+  "enable_progress_stop": false,
+  "rsi_filter_enabled": false,
+  "neural_scorer_enabled": false,
+
+  "neural_v4_enabled": false,
+  "consensus_scoring_enabled": false,
+  "regime_5stage_enabled": false,
+
+  "kpi_tracker_enabled": true,
+  "execution_quality_tracking": true
+}

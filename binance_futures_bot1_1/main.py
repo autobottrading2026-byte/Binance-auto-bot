@@ -3,6 +3,7 @@ import math
 import os
 import atexit
 import logging
+import time
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, List
 
@@ -29,6 +30,19 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 notification_path_default = os.path.join(LOG_DIR, "notifications.log")
 
 
+async def _sync_server_time(client: AsyncClient) -> None:
+    """Sync local timestamp offset with Binance server to prevent -1021 errors."""
+    try:
+        server_time = await client.futures_time()
+        server_ts = int(server_time["serverTime"])
+        local_ts = int(time.time() * 1000)
+        client.timestamp_offset = server_ts - local_ts
+        logging.info(f"[TIME_SYNC] offset={client.timestamp_offset}ms (server={server_ts}, local={local_ts})")
+    except Exception as exc:
+        logging.warning(f"[TIME_SYNC] Failed to sync server time: {exc}")
+        client.timestamp_offset = 0
+
+
 async def _ensure_client(api_key: str, api_secret: str, testnet: bool) -> AsyncClient:
     global current_client, client_context, client_lock
     if client_lock is None:
@@ -45,6 +59,7 @@ async def _ensure_client(api_key: str, api_secret: str, testnet: bool) -> AsyncC
             await current_client.close_connection()
             current_client = None
         current_client = await AsyncClient.create(api_key=api_key or None, api_secret=api_secret or None, testnet=testnet)
+        await _sync_server_time(current_client)
         client_context = {"api_key": api_key, "api_secret": api_secret, "testnet": testnet}
         return current_client
 

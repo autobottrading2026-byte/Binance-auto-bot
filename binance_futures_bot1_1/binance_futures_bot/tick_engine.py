@@ -21,6 +21,10 @@ from binance import AsyncClient
 from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET, ORDER_TYPE_LIMIT
 from binance.exceptions import BinanceAPIException
 from .neural_scorer import NeuralScorer, build_feature_vector
+from .feature_flags import FeatureFlagManager
+from .kpi_tracker import KPITracker
+from .consensus_scorer import ConsensusScorer
+from .execution_quality import ExecutionQualityEngine
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,9 @@ class TickEngine:
         "SYMBOL_CLOSED",
         "UNKNOWN",
     }
+    # [PATCH-17] 상관성 높은 메이저 심볼 — 동시 동방향 진입 제한 대상
+    MAJOR_SYMBOLS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
+
     HARD_CAPS = {
         # [PATCH-13c] config.py 기본값 기준 ±50% 범위로 엄격 제한
         "position_pct": (0.03, 0.08),        # 3~8% (config 기본 6%, 최대 8%)
@@ -157,6 +164,10 @@ class TickEngine:
             "exit_time_stop": deque(),
             "exit_signal_decay": deque(),
             "exit_spike_guard": deque(),
+            # ── Execution Quality Tracking ──
+            "maker_fills": deque(),
+            "taker_fills": deque(),
+            "fill_latencies_ms": deque(),
         }
         self._hold_window: deque[tuple[float, float]] = deque()
         self._pnl_outcomes: deque[tuple[float, float]] = deque()
@@ -165,6 +176,7 @@ class TickEngine:
         self._entry_cooldown_until = 0.0
         self._rate_limit_until = 0.0
         self._global_spike_cooldown_until = 0.0
+        self._last_known_regime: str = "chop"  # [PATCH-17] SL 레짐 판별용 캐시
         self._income_cache = {"ts": 0.0, "value": 0.0}
         self._income_breakdown_cache = {"ts": 0.0, "data": {}}
         self._pnl_fast_window_sec = int(max(60, getattr(self.config, "pnl_fast_window_sec", 1800)))
@@ -212,6 +224,25 @@ class TickEngine:
         # ── 온라인 학습 신경망 스코어러 ─────────────────────────────────────
         _scorer_path = os.path.join(base_dir, "neural_scorer.json")
         self.neural_scorer = NeuralScorer(model_path=_scorer_path)
+        # ── Feature Flags (런타임 기능 토글) ──────────────────────────
+        _flags_path = os.path.join(base_dir, "feature_flags.json")
+        self.feature_flags = FeatureFlagManager(_flags_path)
+        _n_overrides = self.feature_flags.apply_to_config(self.config)
+        if _n_overrides:
+            logger.info("[INIT] Feature flags: %d config overrides applied", _n_overrides)
+        # ── KPI Tracker (6개 핵심 지표 추적) ─────────────────────────
+        self.kpi_tracker: Optional[KPITracker] = (
+            KPITracker(self) if self.feature_flags.is_enabled("kpi_tracker_enabled") else None
+        )
+        # ── Execution Quality Engine (심볼별 maker 계측 + 자동 조정) ──
+        self.exec_quality: Optional[ExecutionQualityEngine] = (
+            ExecutionQualityEngine(self.config)
+            if self.feature_flags.is_enabled("execution_quality_tracking") else None
+        )
+        # ── 3-Party Consensus (Rule/Neural/Tuner 합의) ────────────
+        self.consensus_scorer: Optional[ConsensusScorer] = (
+            ConsensusScorer(self) if self.feature_flags.is_enabled("consensus_scoring_enabled") else None
+        )
         self.stream = None                              # WebSocket stream (externally injected)
         # ── Commercial safety state ────────────────────────────────────
         self._engine_boot_time: float = 0.0          # set in run() for startup grace
@@ -224,15 +255,24 @@ class TickEngine:
         self._api_weight_warned: bool = False              # suppress repeated warn
         self._consecutive_rollbacks: int = 0          # E: auto-tune rollback counter
         self._auto_tune_force_disabled: bool = False  # E: set True after max rollbacks
+        # v2: 봇 시작 시 config.auto_tune_enabled=True면 force_disabled 해제
+        # 이전 세션에서 연속 롤백으로 비활성화되었더라도 재시작 시 리셋
+        if bool(getattr(self.config, "auto_tune_enabled", True)):
+            self._auto_tune_force_disabled = False
 
     async def run(self):
         self.running = True
         self._engine_boot_time = time.time()          # C2: startup grace reference
+        self._last_time_sync = time.time()             # periodic server time sync
         self._init_log_masks()                         # B: register sensitive strings
         await self._hydrate_positions()
         await self._sync_open_orders()                 # C2+C3: reconcile open orders on boot
         while self.running:
             try:
+                # periodic time re-sync every 30 min to prevent -1021 drift
+                if time.time() - self._last_time_sync > 1800:
+                    await self._resync_server_time()
+                    self._last_time_sync = time.time()
                 await self.tick()
             except Exception as exc:
                 logger.exception("Tick error: %s", exc)
@@ -254,10 +294,17 @@ class TickEngine:
         await self._run_auto_tuner_cycle(snapshots)
         await self._enforce_time_and_signal_decay(positions, snapshots)
         # auto_tune OFF여도 세션 손실 한도는 항상 체크
-        if not bool(getattr(self.config, "auto_tune_enabled", False)):
+        if not bool(getattr(self.config, "auto_tune_enabled", True)):
             _pnl = await self._get_fast_trade_pnl()
             self._check_session_loss_limit(_pnl)
         self._emit_metric_snapshot()
+        # ── KPI Tracker: 매 틱 계산 + 배치 저장 ──
+        if self.kpi_tracker:
+            try:
+                self.kpi_tracker.compute_snapshot()
+                self.kpi_tracker.maybe_flush_batch()
+            except Exception as _kpi_err:
+                logger.debug("KPI tracker error: %s", _kpi_err)
         # 5분마다 neural scorer 저장
         if int(time.time()) % 300 < 5:
             try:
@@ -822,6 +869,21 @@ class TickEngine:
                         if _old_val != loaded[_cap_key]:
                             logger.info("[LOAD_CLAMP] %s: %.4f → %.4f (config cap)", _cap_key, _old_val, loaded[_cap_key])
                 tuner.current = loaded
+                # ── [P0-C1] config baseline 대비 state drift 감지 → 강제 리셋 ──
+                # config가 변경되었으나 state에 이전 높은 값이 남아있으면 즉시 baseline으로 리셋
+                _reset_thresholds = {
+                    "volatility_min": 0.0010,
+                    "momentum_min_long": 0.0010,
+                    "momentum_min_short": 0.0010,
+                    "position_pct": 0.005,
+                }
+                for _rk, _rt in _reset_thresholds.items():
+                    _state_val = float(tuner.current.get(_rk, 0))
+                    _baseline_val = float(tuner.baseline.get(_rk, _state_val))
+                    if abs(_state_val - _baseline_val) > _rt:
+                        logger.info("[BOOT_RESET] %s: state=%.5f → baseline=%.5f (drift=%.5f > threshold=%.4f)",
+                                    _rk, _state_val, _baseline_val, abs(_state_val - _baseline_val), _rt)
+                        tuner.current[_rk] = _baseline_val
         else:
             current = data.get("current") or {}
             if isinstance(current, dict):
@@ -853,6 +915,74 @@ class TickEngine:
             if mode_value in tuner.mode_profiles:
                 tuner.current_mode = mode_value
                 tuner._apply_mode_profile()
+
+        # ── v2 신규 필드 복원 ──
+        last_apply_ts = data.get("last_apply_ts")
+        if isinstance(last_apply_ts, (int, float)):
+            tuner.state.last_apply_ts = float(last_apply_ts)
+
+        regime_entered_ts = data.get("regime_entered_ts")
+        if isinstance(regime_entered_ts, (int, float)):
+            tuner.state.regime_entered_ts = float(regime_entered_ts)
+
+        regime_switch_ts = data.get("regime_switch_timestamps")
+        if isinstance(regime_switch_ts, list):
+            tuner.state.regime_switch_timestamps = [float(t) for t in regime_switch_ts if isinstance(t, (int, float))]
+
+        regime_locked = data.get("regime_locked_until")
+        if isinstance(regime_locked, (int, float)):
+            tuner.state.regime_locked_until = float(regime_locked)
+
+        risk_streak = data.get("risk_bias_confirm_streak")
+        if isinstance(risk_streak, int):
+            tuner.state.risk_bias_confirm_streak = risk_streak
+
+        shadow_deferred = data.get("shadow_lite_deferred")
+        if isinstance(shadow_deferred, bool):
+            tuner.state.shadow_lite_deferred = shadow_deferred
+
+        ema_m = data.get("ema_metrics") or {}
+        if isinstance(ema_m, dict):
+            tuner.state.ema_tca_bps = float(ema_m.get("tca_bps", 0.0))
+            tuner.state.ema_failures = float(ema_m.get("failures", 0.0))
+            tuner.state.ema_fill_rate = float(ema_m.get("fill_rate", 1.0))
+            tuner.state.ema_trend_score = float(ema_m.get("trend_score", 0.0))
+            tuner.state.ema_noise_index = float(ema_m.get("noise_index", 0.0))
+            tuner.state.ema_pass_rate = float(ema_m.get("pass_rate", 1.0))
+            tuner.state.ema_pnl = float(ema_m.get("pnl", 0.0))
+
+        targets = data.get("targets")
+        if isinstance(targets, dict):
+            tuner.state.targets = {k: float(v) for k, v in targets.items() if isinstance(v, (int, float))}
+
+        best_targets = data.get("best_targets")
+        if isinstance(best_targets, dict):
+            tuner.state.best_targets = {k: float(v) for k, v in best_targets.items() if isinstance(v, (int, float))}
+
+        best_score = data.get("best_targets_score")
+        if isinstance(best_score, (int, float)):
+            tuner.state.best_targets_score = float(best_score)
+
+        # ── [P0-C1] targets/best_targets도 baseline drift 리셋 ──
+        for _tgt_dict_name in ("targets", "best_targets"):
+            _tgt_dict = getattr(tuner.state, _tgt_dict_name, {})
+            if not isinstance(_tgt_dict, dict):
+                continue
+            for _rk, _rt in {
+                "volatility_min": 0.0015,
+                "momentum_min_long": 0.0015,
+                "momentum_min_short": 0.0015,
+            }.items():
+                _tv = float(_tgt_dict.get(_rk, 0))
+                _bv = float(tuner.baseline.get(_rk, _tv))
+                if abs(_tv - _bv) > _rt:
+                    _tgt_dict[_rk] = _bv
+                    logger.info("[BOOT_RESET] %s.%s: %.5f → %.5f", _tgt_dict_name, _rk, _tv, _bv)
+
+        # ── [P0-C1] 부팅 시 쿨다운 해제 (config 변경 후 바로 적용 가능하도록) ──
+        if tuner.state.cooldown_until > 0:
+            logger.info("[BOOT_RESET] cooldown cleared (was until %.0f)", tuner.state.cooldown_until)
+            tuner.state.cooldown_until = 0.0
 
     @staticmethod
     def _sanitize_lifecycle(lifecycle: dict) -> dict:
@@ -894,6 +1024,25 @@ class TickEngine:
             },
             "current": {k: v for k, v in self.auto_tuner.current.items()
                          if k not in ("watch_limit", "max_open_symbols")},
+            # ── v2 신규 필드 ──
+            "last_apply_ts": self.auto_tuner.state.last_apply_ts,
+            "regime_entered_ts": self.auto_tuner.state.regime_entered_ts,
+            "regime_switch_timestamps": list(self.auto_tuner.state.regime_switch_timestamps),
+            "regime_locked_until": self.auto_tuner.state.regime_locked_until,
+            "risk_bias_confirm_streak": self.auto_tuner.state.risk_bias_confirm_streak,
+            "shadow_lite_deferred": self.auto_tuner.state.shadow_lite_deferred,
+            "ema_metrics": {
+                "tca_bps": self.auto_tuner.state.ema_tca_bps,
+                "failures": self.auto_tuner.state.ema_failures,
+                "fill_rate": self.auto_tuner.state.ema_fill_rate,
+                "trend_score": self.auto_tuner.state.ema_trend_score,
+                "noise_index": self.auto_tuner.state.ema_noise_index,
+                "pass_rate": self.auto_tuner.state.ema_pass_rate,
+                "pnl": self.auto_tuner.state.ema_pnl,
+            },
+            "targets": dict(self.auto_tuner.state.targets) if self.auto_tuner.state.targets else {},
+            "best_targets": dict(self.auto_tuner.state.best_targets) if self.auto_tuner.state.best_targets else {},
+            "best_targets_score": self.auto_tuner.state.best_targets_score,
         }
         try:
             os.makedirs(os.path.dirname(self.auto_tuner_state_path), exist_ok=True)
@@ -1271,11 +1420,43 @@ class TickEngine:
         if self.auto_tuner:
             cooldown_remaining = max(0.0, getattr(self.auto_tuner.state, "cooldown_until", 0.0) - time.time())
             shadow_active = bool(getattr(self.auto_tuner.state, "shadow", None) and getattr(self.auto_tuner.state.shadow, "active", False))
+        # ── v2: GUI에 풍부한 AutoTuner 상태 전달 ──
+        _force_disabled = getattr(self, "_auto_tune_force_disabled", False)
+        _regime = "unknown"
+        _confidence = 0.0
+        _ema_trend = 0.0
+        _ema_noise = 0.0
+        _ema_pnl = 0.0
+        _ema_tca = 0.0
+        _last_apply_ts = 0.0
+        _tune_count_today = 0
+        _risk_bias_streak = 0
+        if self.auto_tuner:
+            _regime = getattr(self.auto_tuner.state.hysteresis, "current_regime", "unknown")
+            _confidence = getattr(self.auto_tuner.state, "confidence", 0.0)
+            _ema_trend = getattr(self.auto_tuner.state, "ema_trend_score", 0.0)
+            _ema_noise = getattr(self.auto_tuner.state, "ema_noise_index", 0.0)
+            _ema_pnl = getattr(self.auto_tuner.state, "ema_pnl", 0.0)
+            _ema_tca = getattr(self.auto_tuner.state, "ema_tca_bps", 0.0)
+            _last_apply_ts = getattr(self.auto_tuner.state, "last_apply_ts", 0.0)
+            _tune_count_today = getattr(self.auto_tuner.state, "tune_count_today", 0)
+            _risk_bias_streak = getattr(self.auto_tuner.state, "risk_bias_confirm_streak", 0)
         auto_tune_state = {
-            "enabled": bool(getattr(self.config, "auto_tune_enabled", False)),
+            "enabled": bool(getattr(self.config, "auto_tune_enabled", True)) and not _force_disabled,
+            "config_enabled": bool(getattr(self.config, "auto_tune_enabled", True)),
+            "force_disabled": _force_disabled,
             "mode": auto_mode,
             "shadow_active": shadow_active,
             "cooldown_remaining_s": cooldown_remaining,
+            "regime": _regime,
+            "confidence": round(_confidence, 4),
+            "ema_trend": round(_ema_trend, 4),
+            "ema_noise": round(_ema_noise, 6),
+            "ema_pnl": round(_ema_pnl, 6),
+            "ema_tca_bps": round(_ema_tca, 2),
+            "last_apply_ts": _last_apply_ts,
+            "tune_count_today": _tune_count_today,
+            "risk_bias_streak": _risk_bias_streak,
         }
         profit_exit_state = {
             "layer": bool(getattr(self.config, "enable_profit_exit_layer", False)),
@@ -1283,6 +1464,22 @@ class TickEngine:
             "trail": bool(getattr(self.config, "enable_atr_trailing_stop", False)),
             "progress": bool(getattr(self.config, "enable_progress_stop", False)),
         }
+        # ── KPI + Execution Quality 요약 ──
+        _kpi_summary = {}
+        if self.kpi_tracker:
+            _kpi_snap = self.kpi_tracker.latest()
+            if _kpi_snap:
+                _kpi_summary = {
+                    "tca_bps": _kpi_snap.tca_bps,
+                    "maker_fill_rate": _kpi_snap.maker_fill_rate,
+                    "pipeline_pass_rate": _kpi_snap.pipeline_pass_rate,
+                    "regime_switch_rate": _kpi_snap.regime_switch_rate,
+                    "ror_proxy": _kpi_snap.ror_proxy,
+                    "edge_after_fee": _kpi_snap.edge_after_fee_pct,
+                }
+        _eq_summary = {}
+        if self.exec_quality:
+            _eq_summary = self.exec_quality.global_summary()
         payload = {
             "ts": time.time(),
             "win_rate": win_rate,
@@ -1298,6 +1495,8 @@ class TickEngine:
             "kill_switch": kill_switch_state,
             "auto_tune": auto_tune_state,
             "profit_exit": profit_exit_state,
+            "kpi": _kpi_summary,
+            "exec_quality": _eq_summary,
         }
         logger.info(
             "[METRIC] win_rate=%.2f expectancy=%.4f avg_hold=%.1fs entry_blocks=%s exits=%s",
@@ -1603,15 +1802,21 @@ class TickEngine:
 
     # ── Kelly 사이징 ─────────────────────────────────────────────────────
     def _kelly_position_pct(self) -> float:
-        """최근 거래 결과 기반 Quarter-Kelly 포지션 비율 + 드로다운 보호."""
+        """[PATCH-17] 3단계 Kelly: 동결→혼합→Full Quarter-Kelly + 드로다운 보호."""
         base_pct = self.config.position_pct
         if not bool(getattr(self.config, "kelly_sizing_enabled", True)):
             return base_pct
-        min_samples = int(getattr(self.config, "kelly_min_samples", 10))
-        dq = self._pnl_outcomes
-        if len(dq) < min_samples:
-            # [PATCH-13] 표본 부족 시에도 연속 손실 보호 적용
+
+        total_trades = len(self._pnl_outcomes)
+        freeze = int(getattr(self.config, "kelly_freeze_threshold", 200))
+        blend = int(getattr(self.config, "kelly_blend_threshold", 500))
+
+        # Phase 1: 고정분할 (데이터 부족 — 추정오차 방지)
+        if total_trades < freeze:
             return self._apply_drawdown_guard(base_pct)
+
+        # Kelly 계산
+        dq = self._pnl_outcomes
         wins = [roi for _, roi in dq if roi > 0]
         losses = [abs(roi) for _, roi in dq if roi < 0]
         if not wins or not losses:
@@ -1623,12 +1828,18 @@ class TickEngine:
             return self._apply_drawdown_guard(base_pct)
         R = avg_win / avg_loss
         kelly = W - (1.0 - W) / R
-        # [PATCH-13] Kelly < 0이면 엣지 없음 → 최소값으로 제한
         if kelly <= 0:
             return max(0.005, base_pct * 0.3)
         fraction = float(getattr(self.config, "kelly_fraction", 0.25))
-        quarter_kelly = max(0.005, min(kelly * fraction, base_pct))
-        return self._apply_drawdown_guard(quarter_kelly)
+        kelly_pct = max(0.005, min(kelly * fraction, base_pct))
+
+        # Phase 2: 혼합 (고정 70% + Kelly 30%)
+        if total_trades < blend:
+            blended = base_pct * 0.7 + kelly_pct * 0.3
+            return self._apply_drawdown_guard(blended)
+
+        # Phase 3: Full Quarter-Kelly
+        return self._apply_drawdown_guard(kelly_pct)
 
     def _apply_drawdown_guard(self, pct: float) -> float:
         """[PATCH-13] 연속 손실 시 포지션 크기 점진적 축소."""
@@ -1700,10 +1911,10 @@ class TickEngine:
         slip_bps = float(getattr(self.config, "tca_slippage_estimate_bps", 0.0) or 0.0)
         tca = (spread_bps + slip_bps) / 10000.0
 
-        # [PATCH-13] 진입=taker, 청산=maker 비대칭 비용 (maker-first exit 전략 반영)
-        # 기존 taker×2는 과도하게 보수적 → 좋은 진입 기회도 차단하는 문제
+        # [PATCH-17] 진입=maker(PATCH-17 활성화), 청산=maker → 비용 현실화
+        # TCA는 편도 1회만 적용 (기존 ×2는 과도하게 보수적이었음)
         fee_cost = taker + maker
-        return fee_cost + (tca * 2) + mark_gap + rv_penalty
+        return fee_cost + tca + mark_gap + rv_penalty
 
     def _edge_covers_cost(self, decision: SignalDecision, snap: SymbolSnapshot) -> bool:
         min_edge = float(getattr(self.config, "min_edge_over_fee_pct", 0.0) or 0.0)
@@ -1711,12 +1922,38 @@ class TickEngine:
         cost = self._total_cost_pct(snap)
         return (expected_move - cost) >= min_edge
 
+    # ── [PATCH-17] 방향 집중도 체크 ─────────────────────────────────────
+    def _check_direction_concentration(self, symbol: str, direction: str) -> bool:
+        """같은 방향 동시진입 집중도 체크 (메이저 상관성 + 전체 동방향 제한)."""
+        major_cap = int(getattr(self.config, "same_direction_major_cap", 2))
+        total_cap = int(getattr(self.config, "max_same_direction_total", 6))
+        if major_cap <= 0 and total_cap <= 0:
+            return True  # 모두 0이면 비활성화
+
+        same_dir_count = 0
+        same_dir_major = 0
+        for sym, snap in self.position_snapshots.items():
+            if getattr(snap, "side", "").upper() == direction.upper():
+                same_dir_count += 1
+                if sym in self.MAJOR_SYMBOLS:
+                    same_dir_major += 1
+
+        # 메이저 심볼 동방향 제한
+        if major_cap > 0 and symbol in self.MAJOR_SYMBOLS and same_dir_major >= major_cap:
+            return False
+        # 전체 동방향 제한
+        if total_cap > 0 and same_dir_count >= total_cap:
+            return False
+        return True
+
     def _compute_stop_loss_price(self, entry_price: float, direction: str, atr: float) -> float:
-        # [PATCH-9] 레짐별 sl_atr_mult: chop=1.0, trend=1.2 (config에서 오버라이드 가능)
-        _base_mult = float(getattr(self.config, "sl_atr_mult", 1.0))
-        _regime = "chop"
-        if self.auto_tuner and bool(getattr(self.config, "auto_tune_enabled", False)):
+        # [PATCH-17] 레짐별 SL 멀티플라이어: chop=1.4, trend=2.0 (크립토 노이즈 대응)
+        _base_mult = float(getattr(self.config, "sl_atr_mult", 2.0))
+        # auto_tune 활성 시 auto_tuner 레짐, 비활성 시 캐시된 레짐 사용
+        if self.auto_tuner and bool(getattr(self.config, "auto_tune_enabled", True)):
             _regime = getattr(self.auto_tuner.state.hysteresis, "current_regime", "chop")
+        else:
+            _regime = getattr(self, "_last_known_regime", "chop")
         if _regime in ("trend_up", "trend_down"):
             mult = float(getattr(self.config, "sl_atr_mult_trend", _base_mult))
         else:
@@ -1854,6 +2091,8 @@ class TickEngine:
                 return "MIN_NOTIONAL"
             if code in (-4047, -4082) or "trading is not allowed" in msg or "no such symbol" in msg:
                 return "SYMBOL_CLOSED"
+            if code == -4411 or "tradfi" in msg or "agreement" in msg:
+                return "TRADFI_AGREEMENT"
             if code in (-2011, -2021) and "reduceonly" in msg:
                 return "STRATEGY_REJECT"
             if code in (-4061, -4062) or "position not adequate" in msg or "insufficient margin" in msg:
@@ -1874,6 +2113,7 @@ class TickEngine:
 
     def _handle_api_exception(self, exc: BinanceAPIException, context: str):
         status = getattr(exc, "status_code", None)
+        code = getattr(exc, "code", None)
         headers = getattr(exc, "headers", {}) or {}
         # C1: parse X-MBX-USED-WEIGHT-1M from error response headers
         for hk in ("x-mbx-used-weight-1m", "X-MBX-USED-WEIGHT-1M", "x-mbx-used-weight"):
@@ -1884,7 +2124,29 @@ class TickEngine:
                 except (ValueError, TypeError):
                     pass
                 break
-        if status == 429:
+        if code == -4411:
+            # TradFi-Perps agreement not signed → permanently block symbol
+            _sym = context.split()[-1] if context else ""
+            # Extract symbol from context string if present
+            for _part in (context or "").replace(":", " ").split():
+                if _part.endswith("USDT") or _part.endswith("BUSD"):
+                    _sym = _part
+                    break
+            if _sym:
+                self._symbol_blocked.add(_sym)
+                if not hasattr(self, "_tradfi_blocked"):
+                    self._tradfi_blocked: set = set()
+                self._tradfi_blocked.add(_sym)
+            self._notify("WARN", self._ko(
+                f"TradFi 계약 미서명: {_sym or context} — 바이낸스에서 TradFi-Perps 계약에 서명해야 거래 가능합니다. 해당 심볼을 자동 제외합니다.",
+                f"TradFi agreement not signed: {_sym or context} — Sign TradFi-Perps contract on Binance to trade this symbol. Auto-blocked.",
+            ))
+            logger.warning("[TRADFI_BLOCK] %s blocked — agreement not signed (code=-4411)", _sym or context)
+        elif code == -1021:
+            # Timestamp ahead/behind server → re-sync
+            asyncio.ensure_future(self._resync_server_time())
+            self._notify("WARN", f"Timestamp error({context}), re-syncing server time")
+        elif status == 429:
             retry_after = float(headers.get("Retry-After", 60))
             self._rate_limit_until = time.time() + retry_after
             self._entry_cooldown_until = max(self._entry_cooldown_until, self._rate_limit_until)
@@ -1896,6 +2158,18 @@ class TickEngine:
         else:
             self._notify("WARN", f"API error {status} on {context}: {exc}")
 
+    async def _resync_server_time(self):
+        """Re-sync timestamp_offset with Binance server."""
+        try:
+            server_time = await self.client.futures_time()
+            server_ts = int(server_time["serverTime"])
+            local_ts = int(time.time() * 1000)
+            self.client.timestamp_offset = server_ts - local_ts
+            logger.info(f"[TIME_SYNC] re-synced offset={self.client.timestamp_offset}ms")
+            self._notify("INFO", f"Time re-synced: offset={self.client.timestamp_offset}ms")
+        except Exception as e:
+            logger.warning(f"[TIME_SYNC] re-sync failed: {e}")
+
     def _check_failure_circuit(self):
         cutoff = time.time() - 600
         while self._order_failures and self._order_failures[0][0] < cutoff:
@@ -1905,7 +2179,7 @@ class TickEngine:
             self._notify("WARN", "Order failure circuit triggered: pausing entries 10m")
 
     async def _run_auto_tuner_cycle(self, snapshots: List[SymbolSnapshot]):
-        if not self.auto_tuner or not getattr(self.config, "auto_tune_enabled", False):  # [PATCH-16] 기본값 False
+        if not self.auto_tuner or not getattr(self.config, "auto_tune_enabled", True):  # [v2] 기본값 True
             return
         returns = self._collect_returns(lookback_sec=300)
         rv30 = self._compute_rv30()
@@ -1991,6 +2265,12 @@ class TickEngine:
         self._maybe_trigger_auto_tune_rollback(pnl_slow_realized, order_failures)
         self._maybe_finalize_pending_params()
         self._persist_auto_tuner_state()
+        # ── EQ: 심볼별 maker 파라미터 자동 미세조정 (5분마다) ──
+        if self.exec_quality:
+            try:
+                self.exec_quality.auto_adjust_all()
+            except Exception as _eq_err:
+                logger.debug("EQ auto_adjust error: %s", _eq_err)
 
     def _apply_auto_tune_params(self, params: Dict[str, float]):
         if not params:
@@ -2980,7 +3260,7 @@ class TickEngine:
                             _effective_hold = max(_min_s, min(int(max_hold * _ratio), _max_s))
                     # [PATCH-9] trend 레짐이면 time-stop 연장 (추세 수익 보호)
                     _ts_regime = "chop"
-                    if self.auto_tuner and bool(getattr(self.config, "auto_tune_enabled", False)):
+                    if self.auto_tuner and bool(getattr(self.config, "auto_tune_enabled", True)):
                         _ts_regime = getattr(self.auto_tuner.state.hysteresis, "current_regime", "chop")
                     if _ts_regime in ("trend_up", "trend_down") and roi_percent > 0:
                         # 추세 + 수익 중이면 최대 2시간까지 연장
@@ -3160,14 +3440,15 @@ class TickEngine:
             return val * 100.0
         return val
 
-    def _normalize_ratio_value(self, value: float) -> float:
+    def _normalize_ratio_value(self, value: float, clamp_max: float = 0.99) -> float:
+        """ratio 정규화: >1.0이면 /100 (단위 오류 자동 보정). 결과는 0~clamp_max."""
         try:
             val = float(value)
         except (TypeError, ValueError):
             return 0.0
         if val > 1.0:
             val = val / 100.0
-        return max(0.0, min(val, 0.99))
+        return max(0.0, min(val, clamp_max))
 
     def _update_profit_tracking(self, snapshot: PositionSnapshot, direction: str, price: float, roi_percent: float):
         if snapshot.highest_price_since_entry is None:
@@ -3301,19 +3582,33 @@ class TickEngine:
         return False
 
     def _fee_break_even_roi_pct(self, entry_price: float, qty: float, leverage: float) -> float:
-        """진입+청산 수수료를 커버하는 최소 ROI % (증거금 기준)."""
+        """진입+청산 수수료 + 슬리피지 + 펀딩 추정을 커버하는 최소 ROI % (증거금 기준).
+        [PATCH-18] taker×2만 → 슬리피지/펀딩 추정 포함 현실적 BEP."""
+        maker = float(getattr(self.config, "maker_fee_pct", 0.0002) or 0.0002)
         taker = float(getattr(self.config, "taker_fee_pct", 0.0005) or 0.0005)
         notional = entry_price * qty if entry_price > 0 and qty > 0 else 0.0
         if notional <= 0 or leverage <= 0:
             return 0.0
         margin = notional / leverage
-        total_fee = notional * taker * 2   # 진입(taker) + 청산(taker) 보수적 계산
-        return (total_fee / margin) * 100.0   # % 단위
+        # 진입: maker-first 활성 시 maker, 아니면 taker
+        _use_maker = bool(getattr(self.config, "maker_first_enabled", False)) and \
+                     not bool(getattr(self.config, "maker_entry_use_taker", True))
+        entry_fee = notional * (maker if _use_maker else taker)
+        exit_fee = notional * taker  # 청산은 보수적으로 taker 가정
+        # 슬리피지 추정: 편도 ~5bps
+        slippage_est = notional * 0.0005
+        # 펀딩 추정: 8시간 기본율 0.01%, 평균 보유 ~2시간 가정
+        funding_est = notional * 0.0001 * 0.25
+        total_cost = entry_fee + exit_fee + slippage_est + funding_est
+        return (total_cost / margin) * 100.0   # % 단위
 
     async def _maybe_execute_trailing_exit(self, symbol: str, snapshot: PositionSnapshot, pos: dict, roi_percent: float, price: float, direction: str) -> bool:
         if not getattr(self.config, "enable_atr_trailing_stop", False):
             return False
-        activate_pct = self._normalize_pct_value(getattr(self.config, "trail_activate_pnl_pct", 0.0))
+        # [PATCH-18] ratio 기반으로 통일: 0.008→0.8%, 0.8→자동보정→0.8%
+        _raw_activate = float(getattr(self.config, "trail_activate_pnl_pct", 0.008) or 0.008)
+        activate_ratio = self._normalize_ratio_value(_raw_activate, clamp_max=0.10)  # max 10%
+        activate_pct = activate_ratio * 100.0  # ratio → percent
         # 수수료 손익분기 이하이면 trailing 활성화 자체를 막음
         _fee_min = self._fee_break_even_roi_pct(
             snapshot.entry_price, snapshot.quantity, snapshot.leverage)
@@ -3819,7 +4114,7 @@ class TickEngine:
             if _against_count >= len(_conflict_tfs):
                 # [PATCH-9] 레짐 확인: trend 레짐에서는 차단 대신 점수 페널티
                 _cur_regime = "chop"
-                if self.auto_tuner and bool(getattr(self.config, "auto_tune_enabled", False)):
+                if self.auto_tuner and bool(getattr(self.config, "auto_tune_enabled", True)):
                     _cur_regime = getattr(self.auto_tuner.state.hysteresis, "current_regime", "chop")
                 if _cur_regime in ("trend_up", "trend_down"):
                     # trend 레짐: 완전 차단 대신 -0.20 점수 페널티 (composite에서 감산)
@@ -3862,7 +4157,7 @@ class TickEngine:
 
         # ── 레짐별 전략 분리 ────────────────────────────────────────────
         regime = "chop"
-        if self.auto_tuner and bool(getattr(self.config, "auto_tune_enabled", False)):
+        if self.auto_tuner and bool(getattr(self.config, "auto_tune_enabled", True)):
             regime = getattr(self.auto_tuner.state.hysteresis, "current_regime", "chop")
         else:
             # auto_tune 미사용 시 단기 EMA slope로 직접 레짐 추정
@@ -3886,6 +4181,8 @@ class TickEngine:
                     regime = "trend_up"
                 elif _avg_slope < -_slope_thresh:
                     regime = "trend_down"
+
+        self._last_known_regime = regime  # [PATCH-17] SL 등에서 재활용
 
         if regime == "chop":
             # CHOP 구간: 임계값 배수 강화로 허수 신호 차단 (config로 조정 가능)
@@ -3962,7 +4259,7 @@ class TickEngine:
                         composite += float(getattr(self.config, "regime_long_penalty_trend_down", -0.10))
             min_composite = float(getattr(self.config, "composite_min_score", 0.80))  # [PATCH-14] 0.72→0.80 config 정렬
             # [PATCH-16] auto_tune 꺼져있으면 regime 기반 조정 무시 (기본값 chop 고정이므로)
-            if regime == "chop" and getattr(self.config, "auto_tune_enabled", False):
+            if regime == "chop" and getattr(self.config, "auto_tune_enabled", True):
                 min_composite = float(getattr(self.config, "chop_composite_min_score", 0.85))
             if composite < min_composite:
                 return None, self._ko(f"복합 스코어 부족 ({composite:.2f} < {min_composite})", f"Composite score too low ({composite:.2f} < {min_composite})")
@@ -4065,6 +4362,24 @@ class TickEngine:
             if (_neural_enabled and _neural_status.get("ready")) else ""
         )
         reason = _trend_prefix + f"momentum_pct={snap.momentum_pct:.4f}, volatility={snap.volatility:.4f}{_neural_info})"
+        # ── 3-Party Consensus (활성화 시) ───────────────────────────
+        if self.consensus_scorer:
+            try:
+                _consensus = self.consensus_scorer.compute_consensus(snap, direction, regime=regime)
+                if _consensus.final_decision is None:
+                    self._increment_flow("blocked_consensus")
+                    return None, f"[CONSENSUS] {_consensus.block_reason}"
+                # consensus 통과 시 strength를 가중 점수로 조정
+                strength = max(strength * _consensus.weighted_score, 0.01)
+                logger.debug(
+                    "[CONSENSUS] %s %s PASS: rule=%.2f neural=%.2f tuner=%.2f → %.2f",
+                    snap.symbol, direction,
+                    _consensus.rule_score, _consensus.neural_prob,
+                    _consensus.tuner_confidence, _consensus.weighted_score
+                )
+            except Exception as _ce:
+                logger.debug("Consensus scorer error: %s", _ce)
+
         self._increment_flow("passed_signal")
         self._record_stat("signals_passed", 1)
         return SignalDecision(symbol=snap.symbol, direction=direction, strength=strength, reason=reason), None
@@ -4135,17 +4450,9 @@ class TickEngine:
             self._increment_skip(symbol=snap.symbol, reason=skip_reason)
             return
 
-        # MTF 하드 게이트: composite_score(가중치 0.20)와 별개로 강제 방향 확인
-        # 이 체크를 통과하지 못하면 진입 불가 (enable_mtf_ema_confirm=False 시 스킵)
-        if not self._mtf_confirm_ok(snap.symbol, decision.direction):
-            skip = self._ko(
-                f"MTF EMA 방향 불일치: {decision.direction} 진입 차단",
-                f"MTF EMA direction mismatch: {decision.direction} entry blocked",
-            )
-            logger.info("ENTRY_BLOCKED_MTF %s direction=%s", snap.symbol, decision.direction)
-            self._notify("WATCH", f"ENTRY_BLOCKED_MTF {snap.symbol} {decision.direction}")
-            self._increment_skip(symbol=snap.symbol, reason=skip)
-            return
+        # [PATCH-17] MTF 하드 게이트 제거 — EMA conflict filter (evaluate_signal 내)와 중복
+        # composite scoring의 MTF 가중치(20%)가 이미 방향 확인을 수행함.
+        # 별도 하드 게이트는 좋은 진입 기회를 불필요하게 차단하므로 비활성화.
 
         # [PATCH-11] 동일 심볼 재진입 쿨다운 — 청산 후 일정 시간 대기
         _reentry_cd = int(getattr(self.config, "symbol_reentry_cooldown_sec", 0) or 0)
@@ -4160,7 +4467,7 @@ class TickEngine:
         # [PATCH-11] chop 레짐에서 동시 포지션 제한
         # [PATCH-16] auto_tune 꺼져있으면 chop 제한 무시 (regime 항상 chop 고정이므로)
         _chop_max = int(getattr(self.config, "chop_max_open_symbols", 0) or 0)
-        if _chop_max > 0 and getattr(self.config, "auto_tune_enabled", False):
+        if _chop_max > 0 and getattr(self.config, "auto_tune_enabled", True):
             _cur_regime = ""
             if hasattr(self, "auto_tuner") and self.auto_tuner:
                 _cur_regime = getattr(self.auto_tuner, "current_regime", "") or ""
@@ -4179,13 +4486,23 @@ class TickEngine:
             self._record_entry_block("blocked_portfolio_cap")
             return
 
+        # [PATCH-17] 방향 집중도 체크 — 메이저 심볼 동방향 제한 + 전체 동방향 제한
+        if not self._check_direction_concentration(snap.symbol, decision.direction):
+            logger.info(
+                "ENTRY_BLOCKED_CONCENTRATION %s direction=%s majors_same_dir",
+                snap.symbol, decision.direction,
+            )
+            self._increment_flow("blocked_concentration")
+            self._notify("WATCH", f"ENTRY_BLOCKED_CONCENTRATION {snap.symbol} {decision.direction}")
+            return
+
         available_balance = await self._get_available_balance()
         # Kelly 사이징: 실적 기반 동적 포지션 비율 (데이터 부족 시 config 값 사용)
         position_pct = max(0.0, self._kelly_position_pct())
         # [PATCH-12] chop 레짐에서 포지션 사이즈 축소
         # [PATCH-16] auto_tune 꺼져있으면 chop 사이즈 축소 무시
         _cur_regime_pos = ""
-        if getattr(self.config, "auto_tune_enabled", False) and hasattr(self, "auto_tuner") and self.auto_tuner:
+        if getattr(self.config, "auto_tune_enabled", True) and hasattr(self, "auto_tuner") and self.auto_tuner:
             _cur_regime_pos = getattr(self.auto_tuner, "current_regime", "") or ""
         if _cur_regime_pos == "chop":
             _chop_mult = float(getattr(self.config, "chop_position_pct_mult", 0.5))
@@ -4476,6 +4793,15 @@ class TickEngine:
             self._notify("ALERT", "\n".join(message_lines))
             self._record_stat("fills", 1)
             self._increment_flow("fill_ok")
+            # ── Execution Quality: maker/taker fill 추적 ──
+            if self.feature_flags.is_enabled("execution_quality_tracking"):
+                _is_maker = (response is not None and
+                             isinstance(response, dict) and
+                             response.get("timeInForce") == "GTX")
+                if _is_maker:
+                    self._record_stat("maker_fills", 1)
+                else:
+                    self._record_stat("taker_fills", 1)
             self._ai_event("ENTRY_CHECK",
                            f"ENTRY_OK {symbol} {decision.direction} qty={quantity:.6f} price={entry_px:.4f} "
                            f"leverage={self._symbol_leverage.get(symbol, 1):.0f}x strength={decision.strength:.2f}")
@@ -4502,7 +4828,7 @@ class TickEngine:
             )
             return True
         except BinanceAPIException as exc:
-            self._handle_api_exception(exc, "execute_order")
+            self._handle_api_exception(exc, f"execute_order {decision.symbol}")
             message = exc.message or str(exc)
             reason = self._classify_order_failure(exc, message)
             self._order_failures.append((time.time(), reason))
@@ -4519,8 +4845,12 @@ class TickEngine:
                 "WARN",
                 f"ORDER_FAILED {decision.symbol} dir={decision.direction} qty={quantity:.4f} reason={message} ({reason})",
             )
-            if exc.code == -4140:
+            if exc.code in (-4140, -4411):
                 self._symbol_blocked.add(decision.symbol)
+                if exc.code == -4411:
+                    if not hasattr(self, "_tradfi_blocked"):
+                        self._tradfi_blocked: set = set()
+                    self._tradfi_blocked.add(decision.symbol)
             return False
         except Exception as exc:
             message = str(exc)
@@ -4552,6 +4882,13 @@ class TickEngine:
         """
         offset_bps = float(getattr(self.config, "maker_first_offset_bps", 0.0) or 0.0)
         timeout_ms = int(getattr(self.config, "maker_first_timeout_ms", 0) or 0)
+        # ── EQ: 심볼별 오버라이드 적용 ──
+        if self.exec_quality:
+            _eq_offset, _eq_timeout = self.exec_quality.get_params(symbol)
+            offset_bps = _eq_offset
+            timeout_ms = _eq_timeout
+            self.exec_quality.record_maker_attempt(symbol)
+        _maker_attempt_ts = time.time()  # 체결 시간 측정용
         if mid_price <= 0 or quantity <= 0 or timeout_ms <= 0:
             return None, mid_price
 
@@ -4588,21 +4925,48 @@ class TickEngine:
             limit_price = mid_price * (1.0 + offset_bps / 10000.0)
         limit_price = max(float(limit_price), 0.0001)
 
-        try:
-            order = await self.client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type=ORDER_TYPE_LIMIT,
-                timeInForce="GTX",  # post-only (maker) for USDT-margined futures
-                quantity=quantity,
-                price=f"{limit_price:.8f}",
-                newOrderRespType="RESULT",
-            )
-        except BinanceAPIException as exc:
-            # Post-only order can be rejected if it would take liquidity.
-            self._handle_api_exception(exc, "maker_first_entry")
-            return None, mid_price
-        except Exception:
+        # [PATCH-18] GTX requote: -5022 거절 시 최대 2회 재시도 (오프셋 확대)
+        _max_requotes = 2
+        order = None
+        for _attempt in range(_max_requotes + 1):
+            try:
+                order = await self.client.futures_create_order(
+                    symbol=symbol,
+                    side=side,
+                    type=ORDER_TYPE_LIMIT,
+                    timeInForce="GTX",  # post-only (maker) for USDT-margined futures
+                    quantity=quantity,
+                    price=f"{limit_price:.8f}",
+                    newOrderRespType="RESULT",
+                )
+                break  # 주문 성공
+            except BinanceAPIException as exc:
+                _code = getattr(exc, "code", None)
+                if _code == -4411:
+                    # TradFi agreement not signed → block symbol, no retry
+                    self._symbol_blocked.add(symbol)
+                    if not hasattr(self, "_tradfi_blocked"):
+                        self._tradfi_blocked: set = set()
+                    self._tradfi_blocked.add(symbol)
+                    self._handle_api_exception(exc, f"maker_first_entry {symbol}")
+                    return None, mid_price
+                if _code == -5022 and _attempt < _max_requotes:
+                    # Post-only rejected → 오프셋 확대 후 재시도
+                    if self.exec_quality:
+                        self.exec_quality.record_gtx_rejection(symbol)
+                    _widen = 1.0 + (_attempt + 1) * 0.5  # 1.5x, 2.0x
+                    if side == SIDE_BUY:
+                        limit_price = mid_price * (1.0 - offset_bps * _widen / 10000.0)
+                    else:
+                        limit_price = mid_price * (1.0 + offset_bps * _widen / 10000.0)
+                    limit_price = max(float(limit_price), 0.0001)
+                    await asyncio.sleep(0.1)
+                    continue
+                self._handle_api_exception(exc, "maker_first_entry")
+                return None, mid_price
+            except Exception:
+                return None, mid_price
+        if order is None:
             return None, mid_price
 
         order_id = None
@@ -4621,6 +4985,11 @@ class TickEngine:
                 status = (last or {}).get("status")
                 if status == "FILLED":
                     fill_px = self._extract_fill_price(last, fallback=limit_price)
+                    # ── EQ: maker 체결 성공 기록 ──
+                    if self.exec_quality:
+                        _fill_ms = (time.time() - _maker_attempt_ts) * 1000.0
+                        _slip = abs(float(fill_px or limit_price) - mid_price) / mid_price * 10000.0 if mid_price > 0 else 0.0
+                        self.exec_quality.record_fill(symbol, is_maker=True, fill_time_ms=_fill_ms, slippage_bps=_slip)
                     return last, float(fill_px or limit_price)
             except BinanceAPIException:
                 break
@@ -4629,6 +4998,9 @@ class TickEngine:
             await asyncio.sleep(0.15)
 
         # Not filled → cancel and fall back to market.
+        # ── EQ: taker 전환 기록 ──
+        if self.exec_quality:
+            self.exec_quality.record_fill(symbol, is_maker=False, fill_time_ms=timeout_ms)
         try:
             if hasattr(self.client, "futures_cancel_order") and order_id:
                 await self.client.futures_cancel_order(symbol=symbol, orderId=order_id)

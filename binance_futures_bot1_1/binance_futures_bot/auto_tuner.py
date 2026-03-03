@@ -1,11 +1,24 @@
+"""AutoTuner v2 — EMA 수렴 + Apply Cadence + Regime Switching Cost.
+
+GPT 최종 개선안(A~H) 반영:
+  A1: best_targets score 기반 선택
+  A2: 시간당 레짐 전환 상한 (max 3/hour)
+  A3: 파라미터별 KPI 분리
+  B1-B2: 레짐 조건부 목표값
+  C: TCA risk_bias 블로킹
+  D: Shadow-lite (대폭 변경 1사이클 유예)
+  G: KPI 로깅
+"""
 import math
 import time
+import logging as _log
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
 from .risk_limits import clamp_params, DEFAULT_LIMITS
 
 LifecycleSnapshot = Dict[str, Any]
+_logger = _log.getLogger(__name__)
 
 
 # -----------------------------
@@ -130,11 +143,51 @@ class AutoTunerState:
     t_up: float = 0.8   # trend_up 진입 임계 (낮출수록 추세 인식 빨라짐)
     t_dn: float = -0.8  # trend_down 진입 임계
 
+    # ── v2 신규 필드 ──
+    last_apply_ts: float = 0.0              # 마지막 실제 적용 시각
+    regime_entered_ts: float = 0.0          # 현재 레짐 진입 시각
+    risk_bias_confirm_streak: int = 0       # risk_bias +1 연속 충족 횟수
+    prev_risk_bias: int = 0                 # 이전 risk_bias 값
+
+    # [A2] 시간당 레짐 전환 타임스탬프 기록
+    regime_switch_timestamps: List[float] = field(default_factory=list)
+    regime_locked_until: float = 0.0        # 전환 초과 시 잠금 시각
+
+    # EMA 메트릭 (다중 타임스케일)
+    ema_tca_bps: float = 0.0               # Fast EMA (5분)
+    ema_failures: float = 0.0              # Fast EMA
+    ema_fill_rate: float = 1.0             # Fast EMA
+    ema_trend_score: float = 0.0           # Mid EMA (15분)
+    ema_noise_index: float = 0.0           # Mid EMA
+    ema_pass_rate: float = 1.0             # Mid EMA
+    ema_pnl: float = 0.0                   # Slow EMA (60분)
+
+    # 목표값 (propose 결과 저장, apply 시 EMA 수렴에 사용)
+    targets: Dict[str, float] = field(default_factory=dict)
+    # [A1] best_targets: score 기반 최적 목표 선택
+    best_targets: Dict[str, float] = field(default_factory=dict)
+    best_targets_score: float = 0.0
+
+    # [D] Shadow-lite: 대폭 변경 유예
+    shadow_lite_deferred: bool = False
+    shadow_lite_deferred_params: Dict[str, float] = field(default_factory=dict)
+
 
 # -----------------------------
 # main class
 # -----------------------------
 class AutoTuner:
+    """AutoTuner v2 — EMA 수렴 기반 파라미터 최적화.
+
+    핵심 변경:
+    - propose는 매 틱(5초), apply는 apply_interval(기본 5분) 이상일 때만
+    - 스텝 점프 → 목표값 + EMA 수렴 (진동 제거)
+    - 레짐 전환 비용 (min_hold + switch_penalty + hourly cap)
+    - risk_bias 확대(+1)는 연속 충족 필요
+    - TCA ≥ 8bps → risk_up 완전 블로킹
+    - Shadow-lite: 대폭 변경 시 1사이클 유예
+    """
+
     def __init__(
         self,
         config,
@@ -145,19 +198,17 @@ class AutoTuner:
         max_tunes_per_day: int = 6,
     ):
         self.notifier = notifier or (lambda level, msg: None)
-        self.config = config  # EngineConfig 참조 보관 (regime 파라미터 조회용)
+        self.config = config
         self.baseline = {
-            # baseline 상한 0.005: 오염된 config값(0.007 등)이 baseline 되는 것 방지
-            # baseline이 높으면 clamp 상한(baseline+0.003)도 올라가서 고값 허용
             "momentum_min_long": max(0.001, min(0.005, float(getattr(config, "momentum_min_long", 0.003)))),
-            "momentum_min_short": min(-0.003, float(getattr(config, "momentum_min_short", -0.005))),  # 최소 0.3% 하락 요구
-            "volatility_min": max(0.001, min(0.005, float(getattr(config, "volatility_min", 0.002)))),
+            "momentum_min_short": min(-0.003, float(getattr(config, "momentum_min_short", -0.005))),
+            "volatility_min": max(0.001, min(0.005, float(getattr(config, "volatility_min", 0.003)))),
             "watch_limit": getattr(config, "watch_limit", 10),
             "max_open_symbols": getattr(config, "max_open_symbols", 10),
-            "position_pct": max(float(getattr(config, "position_pct", 0.06)), 0.005),  # [PATCH-14] 0.05→0.06
-            "leverage_min": float(getattr(config, "leverage_min", 1)),      # [PATCH-14] 5→1
-            "leverage_max": float(getattr(config, "leverage_max", 10)),      # [PATCH-14] 25→10
-            "max_loss_per_position": float(getattr(config, "max_loss_per_position", 1.8)),  # [PATCH-14] 55.0→1.8
+            "position_pct": max(float(getattr(config, "position_pct", 0.06)), 0.005),
+            "leverage_min": float(getattr(config, "leverage_min", 1)),
+            "leverage_max": float(getattr(config, "leverage_max", 10)),
+            "max_loss_per_position": float(getattr(config, "max_loss_per_position", 1.8)),
         }
         self.current_mode = str(getattr(config, "auto_tune_mode", "balanced") or "balanced").lower()
         if self.current_mode not in {"aggressive", "balanced", "conservative"}:
@@ -168,27 +219,23 @@ class AutoTuner:
         self.state.shadow.cycles_required = int(shadow_cycles)
         self.cooldown_sec = int(cooldown_min) * 60
         self.max_tunes_per_day = int(max_tunes_per_day)
+
         # clamps (spec)
-        # ═══════════════════════════════════════════════════════════
-        # 🚀 v2.0 최소 패치: Hard Floor 적용
-        # - watch_limit 최소: 5 → 10
-        # - max_open_symbols 최소: 2 → 5
-        # ═══════════════════════════════════════════════════════════
+        # [P1-I2] volatility_min 상한을 baseline+0.001로 동적화 (고정 0.006 대신)
         self.base_clamps = {
-            # clamp 상한: baseline(≤0.005) + 0.001 = 최대 0.006
-            # 0.007 이상이면 대부분 심볼 진입 차단되므로 엄격하게 제한
             "momentum_min_long": (max(0.001, self.baseline["momentum_min_long"] - 0.002), min(0.006, self.baseline["momentum_min_long"] + 0.001)),
-            "momentum_min_short": (self.baseline["momentum_min_short"] - 0.003, min(-0.003, self.baseline["momentum_min_short"] + 0.003)),  # 최소 0.3% 요구
-            "volatility_min": (0.0010, 0.0060),  # 상한 0.012→0.006 (너무 높으면 진입 불가)
-            "watch_limit": (10, 20),  # 최소 10개 심볼 감시 (5→10 상향!)
-            "max_open_symbols": (5, 12),  # 최소 5개 포지션 (2→5 상향!)
-            "position_pct": (0.03, 0.08),   # [PATCH-14] 0.12→0.08 risk_limits 정렬
-            "leverage_min": (1, 5),         # [PATCH-14] 60→5 risk_limits 정렬
-            "leverage_max": (3, 12),        # [PATCH-14] 120→12 risk_limits 정렬
-            "max_loss_per_position": (0.5, 2.2),  # [PATCH-14] 60→2.2 risk_limits 정렬
+            "momentum_min_short": (self.baseline["momentum_min_short"] - 0.003, min(-0.003, self.baseline["momentum_min_short"] + 0.003)),
+            "volatility_min": (0.0010, self.baseline["volatility_min"] + 0.001),
+            "watch_limit": (10, 20),
+            "max_open_symbols": (5, 12),
+            "position_pct": (0.03, 0.08),
+            "leverage_min": (1, 5),
+            "leverage_max": (3, 12),
+            "max_loss_per_position": (0.5, 2.2),
         }
         self.clamps = dict(self.base_clamps)
-        # per-cycle step limits
+
+        # per-cycle step limits (legacy, kept for safety_guard compatibility)
         self.base_step = {
             "momentum_min_long": 0.0008,
             "momentum_min_short": 0.0008,
@@ -201,14 +248,15 @@ class AutoTuner:
             "max_loss_per_position": 0.3,
         }
         self.max_step = dict(self.base_step)
+
         self.mode_profiles = {
             "aggressive": {
-                "position_pct": (0.03, 0.08),       # [PATCH-14] 0.18→0.08 risk_limits 정렬
+                "position_pct": (0.03, 0.08),
                 "watch_limit": (12, 20),
                 "max_open_symbols": (6, 14),
-                "leverage_min": (1, 5),              # [PATCH-14] 90→5 risk_limits 정렬
-                "leverage_max": (3, 12),             # [PATCH-14] 100→12 risk_limits 정렬
-                "max_loss_per_position": (0.5, 2.2), # [PATCH-14] 60→2.2 risk_limits 정렬
+                "leverage_min": (1, 5),
+                "leverage_max": (3, 12),
+                "max_loss_per_position": (0.5, 2.2),
                 "step_scale": 1.4,
                 "risk_bias_up": 0.62,
                 "risk_bias_down": 0.32,
@@ -216,12 +264,12 @@ class AutoTuner:
                 "pnl_loss_floor": -0.008,
             },
             "balanced": {
-                "position_pct": (0.03, 0.08),        # [PATCH-14] 0.12→0.08 risk_limits 정렬
+                "position_pct": (0.03, 0.08),
                 "watch_limit": (10, 20),
                 "max_open_symbols": (5, 12),
-                "leverage_min": (1, 5),               # [PATCH-14] 80→5 risk_limits 정렬
-                "leverage_max": (3, 12),              # [PATCH-14] 100→12 risk_limits 정렬
-                "max_loss_per_position": (0.5, 2.2),  # [PATCH-14] 55→2.2 risk_limits 정렬
+                "leverage_min": (1, 5),
+                "leverage_max": (3, 12),
+                "max_loss_per_position": (0.5, 2.2),
                 "step_scale": 1.0,
                 "risk_bias_up": 0.70,
                 "risk_bias_down": 0.35,
@@ -229,12 +277,12 @@ class AutoTuner:
                 "pnl_loss_floor": -0.006,
             },
             "conservative": {
-                "position_pct": (0.03, 0.08),        # [PATCH-14] 0.02→0.03 risk_limits 정렬
+                "position_pct": (0.03, 0.08),
                 "watch_limit": (8, 15),
                 "max_open_symbols": (4, 10),
-                "leverage_min": (1, 5),               # [PATCH-14] 60→5 risk_limits 정렬
-                "leverage_max": (3, 12),              # [PATCH-14] 110→12 risk_limits 정렬
-                "max_loss_per_position": (0.5, 2.2),  # [PATCH-14] 40→2.2 risk_limits 정렬
+                "leverage_min": (1, 5),
+                "leverage_max": (3, 12),
+                "max_loss_per_position": (0.5, 2.2),
                 "step_scale": 0.7,
                 "risk_bias_up": 0.80,
                 "risk_bias_down": 0.45,
@@ -245,6 +293,7 @@ class AutoTuner:
         if self.current_mode not in self.mode_profiles:
             self.current_mode = "balanced"
         self._apply_mode_profile()
+
         # lifecycle
         init_snapshot = self._make_snapshot(
             params=self.current,
@@ -258,21 +307,22 @@ class AutoTuner:
             "proposed": None,
         }
         self.lifecycle_meta: Dict[str, Any] = {
-            "version": 1,
+            "version": 2,
             "updated_at": time.time(),
             "last_apply_at": 0.0,
             "last_rollback_at": 0.0,
             "rollback_reason": "",
         }
+
         # hysteresis/debounce
         self.regime_hits_required = 2
-        # [PATCH-1] 적응형 히스테리시스: 강한 신호는 빠른 전환
-        self.regime_hits_required_base = 2       # 기본값 유지 (약한 신호)
-        self.regime_fast_threshold = 1.2         # 강한 신호 임계값 (|score| >= 1.2)
-        self.regime_hits_fast = 1                # 강한 신호 시 1회 확인으로 즉시 전환
+        self.regime_hits_required_base = 2
+        self.regime_fast_threshold = 1.2
+        self.regime_hits_fast = 1
         self.noise_spike_ratio = 1.30
         self.noise_spike_hits_required = 2
 
+    # ── lifecycle helpers ──────────────────────────────────────
     def _make_snapshot(self, params: Dict[str, float], regime: str = "", metrics: Optional[Dict[str, float]] = None, rationale: str = "") -> LifecycleSnapshot:
         metrics = metrics or {}
         snapshot = {
@@ -315,7 +365,7 @@ class AutoTuner:
 
     def _apply_mode_profile(self):
         profile = self.mode_profiles.get(self.current_mode, self.mode_profiles["balanced"])
-        for key in ("position_pct", "leverage_min", "leverage_max", "max_loss_per_position"):  # watch_limit/max_open_symbols은 auto-tune 제외
+        for key in ("position_pct", "leverage_min", "leverage_max", "max_loss_per_position"):
             if key in profile:
                 self.clamps[key] = profile[key]
         step_scale = profile.get("step_scale", 1.0)
@@ -327,6 +377,26 @@ class AutoTuner:
         self.pnl_gain_floor = profile.get("pnl_gain_floor", 0.0)
         self.pnl_loss_floor = profile.get("pnl_loss_floor", -0.006)
 
+    # ── cooldown/daily helpers ──────────────────────────────────
+    def _cooldown_active(self) -> bool:
+        return time.time() < self.state.cooldown_until
+
+    def _bump_cooldown(self):
+        self.state.cooldown_until = time.time() + self.cooldown_sec
+
+    def _day_key(self) -> str:
+        return time.strftime("%Y-%m-%d", time.gmtime())
+
+    def _bump_daily_counter(self):
+        dk = self._day_key()
+        if self.state.tune_day_key != dk:
+            self.state.tune_day_key = dk
+            self.state.tune_count_today = 0
+        self.state.tune_count_today += 1
+
+    # ═══════════════════════════════════════════════════════════
+    # compute_metrics — v2: 다중 타임스케일 EMA + confidence 재계산
+    # ═══════════════════════════════════════════════════════════
     def compute_metrics(
         self,
         returns: List[float],
@@ -361,16 +431,49 @@ class AutoTuner:
         mu, sigma_eff, mad = mad_sigma(returns, sigma_floor=sigma_floor)
         trend_score = 0.0 if sigma_eff <= 0 else math.copysign(abs(mu) / sigma_eff, mu)
         noise_index = max(0.0, sigma_eff - abs(mu))
-        trend_component = clamp(abs(trend_score) / 2.0, 0.0, 1.0)
-        quality_component = clamp((signal_pass_rate + execution_pass_rate + pure_fill_rate) / 3.0, 0.0, 1.0)
-        noise_penalty = clamp(noise_index / 0.01, 0.0, 1.0)
-        _raw_conf = 0.6 * trend_component + 0.3 * quality_component - 0.3 * noise_penalty
-        # ── 부트스트랩 보정: 시작 직후 데이터가 없을 때 conf=0이 되어 파라미터 교체
-        # 불가능한 데드락 방지 — returns가 10개 미만이면 최소 0.20 보장
-        if len(returns) < 10:
-            _raw_conf = max(_raw_conf, 0.20)
-        confidence = clamp(_raw_conf, 0.0, 1.0)
         pnl_frac = normalize_pnl(pnl_30m)
+
+        # TCA cost_bps (최대값 사용)
+        cost_bps = max(
+            float(slippage_bps_med) if slippage_bps_med is not None else 0.0,
+            float(tca_spread_bps_med) if tca_spread_bps_med is not None else 0.0,
+            float(spread_bps_med) if spread_bps_med is not None else 0.0,
+        )
+
+        # ── v2: 다중 타임스케일 EMA 업데이트 ──
+        # Fast (α ≈ 0.15) — 5분 상당: TCA, failures, fill_rate
+        alpha_fast = 0.15
+        self.state.ema_tca_bps = exp_smooth(self.state.ema_tca_bps, cost_bps, alpha_fast)
+        self.state.ema_failures = exp_smooth(self.state.ema_failures, float(order_failures), alpha_fast)
+        self.state.ema_fill_rate = exp_smooth(self.state.ema_fill_rate, pure_fill_rate, alpha_fast)
+
+        # Mid (α ≈ 0.05) — 15분 상당: trend, noise, pass_rate
+        alpha_mid = 0.05
+        self.state.ema_trend_score = exp_smooth(self.state.ema_trend_score, trend_score, alpha_mid)
+        self.state.ema_noise_index = exp_smooth(self.state.ema_noise_index, noise_index, alpha_mid)
+        self.state.ema_pass_rate = exp_smooth(self.state.ema_pass_rate, signal_pass_rate, alpha_mid)
+
+        # Slow (α ≈ 0.014) — 60분 상당: PnL
+        alpha_slow = 0.014
+        self.state.ema_pnl = exp_smooth(self.state.ema_pnl, pnl_frac, alpha_slow)
+
+        # ── v2: confidence 재계산 (다중 타임스케일 기반) ──
+        wT = float(getattr(self.config, 'conf_weight_trend', 0.55))
+        wQ = float(getattr(self.config, 'conf_weight_quality', 0.20))
+        wN = float(getattr(self.config, 'conf_weight_noise', 0.20))
+        wP = float(getattr(self.config, 'conf_weight_pnl', 0.05))
+
+        trend_comp = clamp(abs(self.state.ema_trend_score) / 2.0, 0.0, 1.0)
+        quality_comp = clamp((self.state.ema_pass_rate + self.state.ema_fill_rate) / 2.0, 0.0, 1.0)
+        noise_comp = clamp(self.state.ema_noise_index / 0.01, 0.0, 1.0)
+        pnl_comp = clamp((self.state.ema_pnl + 0.01) / 0.02, 0.0, 1.0)  # -1%~+1% → 0~1
+
+        confidence = clamp(wT * trend_comp + wQ * quality_comp - wN * noise_comp + wP * pnl_comp, 0.0, 1.0)
+
+        # 부트스트랩 보정: returns가 10개 미만이면 최소 0.20 보장
+        if len(returns) < 10:
+            confidence = max(confidence, 0.20)
+
         metrics = {
             "mu": float(mu),
             "mad": float(mad),
@@ -404,24 +507,35 @@ class AutoTuner:
             "tca_spread_bps_med": float(tca_spread_bps_med) if tca_spread_bps_med is not None else 0.0,
             "tca_spread_bps_p90": float(tca_spread_bps_p90) if tca_spread_bps_p90 is not None else 0.0,
             "tca_samples": float(tca_samples) if tca_samples is not None else 0.0,
+            # [G] KPI 추가 메트릭
+            "cost_bps": float(cost_bps),
+            "ema_trend_score": float(self.state.ema_trend_score),
+            "ema_noise_index": float(self.state.ema_noise_index),
+            "ema_pnl": float(self.state.ema_pnl),
+            "ema_tca_bps": float(self.state.ema_tca_bps),
+            "ema_fill_rate": float(self.state.ema_fill_rate),
         }
         self.state.last_metrics = metrics
         self.state.confidence = confidence
         return metrics
 
+    # ═══════════════════════════════════════════════════════════
+    # classify_regime — v2: 전환 비용 + 최소 유지시간 + 시간당 캡
+    # ═══════════════════════════════════════════════════════════
     def classify_regime(self, metrics: Dict[str, float]) -> str:
         score = metrics["trend_score"]
         noise = metrics["noise_index"]
         noise_threshold = float(getattr(self.config, "regime_noise_threshold", 0.012))
-        # config로 t_up/t_dn 재정의 가능 (기본값은 HysteresisState)
         t_up = float(getattr(self.config, "regime_trend_up_threshold", self.state.t_up))
         t_dn = float(getattr(self.config, "regime_trend_dn_threshold", self.state.t_dn))
+
         if score > t_up and noise < noise_threshold:
             cand = "trend_up"
         elif score < t_dn and noise < noise_threshold:
             cand = "trend_down"
         else:
             cand = "chop"
+
         h = self.state.hysteresis
         if cand == "trend_up":
             h.up_hits += 1
@@ -435,205 +549,373 @@ class AutoTuner:
             h.chop_hits += 1
             h.up_hits = 0
             h.down_hits = 0
-        # [PATCH-1] 적응형 히스테리시스: 강한 신호는 빠른 전환
+
+        # [PATCH-1] 적응형 히스테리시스
         abs_score = abs(score)
-        required = self.regime_hits_required_base  # 기본 2회
+        required = self.regime_hits_required_base
         if abs_score >= self.regime_fast_threshold:
-            required = self.regime_hits_fast  # 강한 신호 시 1회
+            required = self.regime_hits_fast
+
+        # 히스테리시스 통과한 후보 결정
+        candidate = h.current_regime
         if h.up_hits >= required:
-            h.current_regime = "trend_up"
+            candidate = "trend_up"
         elif h.down_hits >= required:
-            h.current_regime = "trend_down"
+            candidate = "trend_down"
         elif h.chop_hits >= required:
-            h.current_regime = "chop"
+            candidate = "chop"
+
+        # ── v2: 전환 시도 시 추가 검증 ──
+        now = time.time()
+        current = h.current_regime
+
+        # [A2] 시간당 레짐 전환 캡: 잠금 상태면 chop 강제
+        if now < self.state.regime_locked_until:
+            return current
+
+        if candidate != current:
+            min_hold = float(getattr(self.config, 'regime_min_hold_sec', 180))
+            switch_penalty = float(getattr(self.config, 'regime_switch_penalty', 0.08))
+            max_per_hour = int(getattr(self.config, 'regime_switch_max_per_hour', 3))
+
+            time_in_regime = now - self.state.regime_entered_ts
+
+            # 조건1: 최소 유지시간 충족
+            if time_in_regime < min_hold and self.state.regime_entered_ts > 0:
+                return current  # 전환 거부
+
+            # 조건2: confidence 차이가 switch_penalty 이상
+            if metrics["confidence"] < self.state.confidence + switch_penalty:
+                # 예외: 현재 confidence가 매우 높으면 (>0.6) penalty 무시
+                if metrics["confidence"] < 0.6:
+                    return current  # 전환 거부 (확신 부족)
+
+            # [A2] 조건3: 시간당 전환 횟수 제한
+            # 1시간 이내 전환 기록 정리
+            one_hour_ago = now - 3600
+            self.state.regime_switch_timestamps = [
+                ts for ts in self.state.regime_switch_timestamps if ts > one_hour_ago
+            ]
+            if len(self.state.regime_switch_timestamps) >= max_per_hour:
+                # 초과: 30분 잠금 + chop 강제
+                self.state.regime_locked_until = now + 1800
+                h.current_regime = "chop"
+                self.state.regime_entered_ts = now
+                _logger.warning(
+                    "REGIME_LOCK: %d switches/hour exceeded max=%d → chop forced for 30min",
+                    len(self.state.regime_switch_timestamps), max_per_hour,
+                )
+                self.notifier("WARN", f"AutoTune regime lock: {len(self.state.regime_switch_timestamps)} switches/hour → chop 30min")
+                return "chop"
+
+            # 전환 승인
+            h.current_regime = candidate
+            self.state.regime_entered_ts = now
+            self.state.regime_switch_timestamps.append(now)
+            _logger.info("REGIME_SWITCH: %s → %s (conf=%.2f, time_in=%.0fs)",
+                         current, candidate, metrics["confidence"], time_in_regime)
+
         return h.current_regime
 
-    def _cooldown_active(self) -> bool:
-        return time.time() < self.state.cooldown_until
-
-    def _bump_cooldown(self):
-        self.state.cooldown_until = time.time() + self.cooldown_sec
-
-    def _day_key(self) -> str:
-        return time.strftime("%Y-%m-%d", time.gmtime())
-
-    def _bump_daily_counter(self):
-        dk = self._day_key()
-        if self.state.tune_day_key != dk:
-            self.state.tune_day_key = dk
-            self.state.tune_count_today = 0
-        self.state.tune_count_today += 1
-
-    def propose_adjustment(self, regime: str, metrics: Dict[str, float]) -> Dict[str, float]:
-        proposal = dict(self.current)
-        if getattr(self, "mode_profiles", None) and self.current_mode in self.mode_profiles:
-            proposal["auto_tune_mode"] = self.current_mode
-        # momentum rules (long/short separated)
-        if regime == "trend_up":
-            proposal["momentum_min_long"] = self.current["momentum_min_long"] + self.max_step["momentum_min_long"]
-            proposal["momentum_min_short"] = exp_smooth(
-                self.current["momentum_min_short"], self.baseline["momentum_min_short"], alpha=0.3
-            )
-        elif regime == "trend_down":
-            # strengthens short if your short rule is (momentum <= momentum_min_short)
-            proposal["momentum_min_short"] = self.current["momentum_min_short"] - self.max_step["momentum_min_short"]
-            proposal["momentum_min_long"] = exp_smooth(
-                self.current["momentum_min_long"], self.baseline["momentum_min_long"], alpha=0.3
-            )
-        else:
-            # chop/range: baseline 방향으로 회귀
-            # momentum이 과도하게 높으면 alpha 강화하여 빠르게 낮춤
-            _mom_long_cur = self.current["momentum_min_long"]
-            _mom_alpha = 0.5 if _mom_long_cur >= 0.006 else 0.3  # 0.006 이상은 빠른 수렴
-            proposal["momentum_min_long"] = exp_smooth(
-                _mom_long_cur, self.baseline["momentum_min_long"], alpha=_mom_alpha
-            )
-            proposal["momentum_min_short"] = exp_smooth(
-                self.current["momentum_min_short"], self.baseline["momentum_min_short"], alpha=0.3
-            )
-        # noise debounce via sigma ratio
-        prev_sigma = self.state.last_metrics.get("sigma_eff", metrics["sigma_eff"])
-        sigma_ratio = (metrics["sigma_eff"] / prev_sigma) if prev_sigma > 0 else 1.0
-        h = self.state.hysteresis
-        if sigma_ratio >= self.noise_spike_ratio:
-            h.noise_spike_hits += 1
-        else:
-            h.noise_spike_hits = 0
-        high_noise = (metrics["noise_index"] > 0.004) or (h.noise_spike_hits >= self.noise_spike_hits_required)
-        if high_noise:
-            proposal["volatility_min"] = self.current["volatility_min"] + self.max_step["volatility_min"]
-        else:
-            proposal["volatility_min"] = exp_smooth(
-                self.current["volatility_min"], self.baseline["volatility_min"], alpha=0.3
-            )
-        # watch_limit / max_open_symbols는 auto-tune 조정 대상 완전 제외
-        # 심볼 감시 수는 진입 필터(MTF, composite 등)가 이미 담당하므로
-        # 줄여봐야 기회 손실만 발생하고 리스크 감소 효과 없음
-        # proposal에서 제거하여 state 파일에도 저장되지 않도록 함
-        proposal.pop("watch_limit", None)
-        proposal.pop("max_open_symbols", None)
-
-        # risk controls: position size, leverage range, stop-loss tolerance
-        pnl_bias = metrics["pnl_30m"]
+    # ═══════════════════════════════════════════════════════════
+    # _compute_risk_bias — v2: 연속 확인 + TCA 블로킹
+    # ═══════════════════════════════════════════════════════════
+    def _compute_risk_bias(self, metrics: Dict[str, float]) -> int:
+        """[C] risk_bias 확대(+1)는 연속 충족 필요.
+        TCA ≥ 8bps → risk_up 완전 블로킹.
+        """
         confidence = metrics["confidence"]
-        failures = metrics["order_failures"]
-        risk_bias = 0
-        if confidence > self.risk_bias_up and pnl_bias >= self.pnl_gain_floor and failures == 0:
-            risk_bias = 1
-        elif confidence < self.risk_bias_down or pnl_bias <= self.pnl_loss_floor or failures >= 2:
-            risk_bias = -1
+        pnl = self.state.ema_pnl
+        failures = self.state.ema_failures
+        tca = self.state.ema_tca_bps
 
-        # Cost-aware override (TCA / liquidity): if costs are elevated, de-risk and demand more edge.
-        tca_n = float(metrics.get("tca_samples", 0.0) or 0.0)
-        cost_bps = max(
-            float(metrics.get("slippage_bps_med", 0.0) or 0.0),
-            float(metrics.get("tca_spread_bps_med", 0.0) or 0.0),
-            float(metrics.get("spread_bps_med", 0.0) or 0.0),
-        )
-        # Soft/hard bands (bps) tuned for perp taker-heavy execution; you can tweak later.
-        soft_cost = 8.0
-        hard_cost = 12.0
-        if tca_n >= 3 and cost_bps >= hard_cost:
-            risk_bias = -1
-            # TCA 비용 높을 때: watch_limit 감소 제거 → volatility_min 높여서 저유동성 심볼만 걸러냄
-            proposal["volatility_min"] = self.current["volatility_min"] + self.max_step["volatility_min"]
-        elif tca_n >= 3 and cost_bps >= soft_cost and pnl_bias < self.pnl_gain_floor:
-            risk_bias = -1
-            proposal["volatility_min"] = self.current["volatility_min"] + self.max_step["volatility_min"]
+        confirm_needed = int(getattr(self.config, 'risk_bias_confirm_count', 2))
 
-        if tca_n >= 3 and cost_bps >= soft_cost:
-            # demand more momentum edge to compensate for costs
-            proposal["momentum_min_long"] = self.current["momentum_min_long"] + self.max_step["momentum_min_long"]
-            proposal["momentum_min_short"] = self.current["momentum_min_short"] - self.max_step["momentum_min_short"]
-        if risk_bias > 0:
-            proposal["position_pct"] = self.current["position_pct"] + self.max_step["position_pct"]
-            proposal["leverage_max"] = self.current["leverage_max"] + self.max_step["leverage_max"]
-            proposal["leverage_min"] = max(1.0, self.current["leverage_min"] - self.max_step["leverage_min"])
-            proposal["max_loss_per_position"] = self.current["max_loss_per_position"] + self.max_step["max_loss_per_position"]
-        elif risk_bias < 0:
-            proposal["position_pct"] = self.current["position_pct"] - self.max_step["position_pct"]
-            proposal["leverage_max"] = max(5.0, self.current["leverage_max"] - self.max_step["leverage_max"])
-            proposal["leverage_min"] = self.current["leverage_min"] + self.max_step["leverage_min"]
-            proposal["max_loss_per_position"] = self.current["max_loss_per_position"] - self.max_step["max_loss_per_position"]
+        # [C] TCA ≥ 8bps → risk_up 완전 차단
+        tca_hard_block = 8.0
+        if tca >= tca_hard_block:
+            self.state.risk_bias_confirm_streak = 0
+            # TCA 높으면 risk_down
+            return -1
+
+        # risk_down 조건
+        if confidence < 0.40 or pnl <= -0.004 or failures >= 1.2:
+            self.state.risk_bias_confirm_streak = 0
+            return -1
+
+        # risk_up 조건 (연속 확인 필요)
+        if confidence > 0.75 and pnl >= 0 and failures < 0.5:
+            self.state.risk_bias_confirm_streak += 1
+            if self.state.risk_bias_confirm_streak >= confirm_needed:
+                return 1
+            return 0  # 아직 확인 부족
+
+        self.state.risk_bias_confirm_streak = 0
+        return 0
+
+    # ═══════════════════════════════════════════════════════════
+    # _score_targets — [A1] best_targets score 기반 선택
+    # ═══════════════════════════════════════════════════════════
+    def _score_targets(self, targets: Dict[str, float], metrics: Dict[str, float], regime: str) -> float:
+        """Score = 0.55*trend + 0.20*quality - 0.20*noise + 0.05*pnl - switch_penalty"""
+        wT = float(getattr(self.config, 'conf_weight_trend', 0.55))
+        wQ = float(getattr(self.config, 'conf_weight_quality', 0.20))
+        wN = float(getattr(self.config, 'conf_weight_noise', 0.20))
+        wP = float(getattr(self.config, 'conf_weight_pnl', 0.05))
+
+        trend_val = clamp(abs(self.state.ema_trend_score) / 2.0, 0.0, 1.0)
+        quality_val = clamp((self.state.ema_pass_rate + self.state.ema_fill_rate) / 2.0, 0.0, 1.0)
+        noise_val = clamp(self.state.ema_noise_index / 0.01, 0.0, 1.0)
+        pnl_val = clamp((self.state.ema_pnl + 0.01) / 0.02, 0.0, 1.0)
+
+        # 레짐 전환 패널티: 현재와 다른 레짐이면 감점
+        switch_pen = 0.0
+        if regime != self.state.hysteresis.current_regime:
+            switch_pen = float(getattr(self.config, 'regime_switch_penalty', 0.08))
+
+        score = wT * trend_val + wQ * quality_val - wN * noise_val + wP * pnl_val - switch_pen
+        return score
+
+    # ═══════════════════════════════════════════════════════════
+    # propose_adjustment — v2: 목표값 기반 + 파라미터별 KPI 분리
+    # ═══════════════════════════════════════════════════════════
+    def propose_adjustment(self, regime: str, metrics: Dict[str, float]) -> Dict[str, float]:
+        """[A3] 각 파라미터는 관련 KPI에만 반응:
+        - momentum → trend_score, quality
+        - volatility → noise_index
+        - position/leverage → pnl, risk_bias
+        """
+        targets = dict(self.baseline)
+        quality = clamp((self.state.ema_pass_rate + self.state.ema_fill_rate) / 2.0, 0.0, 1.0)
+
+        # ── [B1-B2] 레짐 조건부 목표값 ──
+        if regime == "trend_up":
+            # trend_up + good quality → 강한 목표값
+            offset = 0.0008 if quality > 0.6 else 0.0006
+            targets["momentum_min_long"] = self.baseline["momentum_min_long"] + offset
+            targets["momentum_min_short"] = self.baseline["momentum_min_short"]  # baseline 회귀
+            targets["volatility_min"] = self.baseline["volatility_min"]  # 추세 시 변동성 필터 완화
+
+        elif regime == "trend_down":
+            offset = 0.0008 if quality > 0.6 else 0.0006
+            targets["momentum_min_short"] = self.baseline["momentum_min_short"] - offset
+            targets["momentum_min_long"] = self.baseline["momentum_min_long"]   # baseline 회귀
+            targets["volatility_min"] = self.baseline["volatility_min"]
+
         else:
-            proposal["position_pct"] = exp_smooth(
-                self.current["position_pct"], self.baseline["position_pct"], alpha=0.3
-            )
-            proposal["leverage_min"] = exp_smooth(
-                self.current["leverage_min"], self.baseline["leverage_min"], alpha=0.3
-            )
-            proposal["leverage_max"] = exp_smooth(
-                self.current["leverage_max"], self.baseline["leverage_max"], alpha=0.3
-            )
-            proposal["max_loss_per_position"] = exp_smooth(
-                self.current["max_loss_per_position"], self.baseline["max_loss_per_position"], alpha=0.3
-            )
+            # [B2] chop: good chop vs bad chop
+            if quality > 0.6:
+                # good chop: 약간만 방어적
+                targets["momentum_min_long"] = self.baseline["momentum_min_long"]
+                # [P1-I3] chop 숏 모멘텀 완화: baseline + 0.001 (-0.004 → -0.003)
+                targets["momentum_min_short"] = self.baseline["momentum_min_short"] + 0.001
+                targets["volatility_min"] = self.baseline["volatility_min"] + 0.0004
+                targets["position_pct"] = self.baseline["position_pct"] - 0.0005
+            else:
+                # bad chop: 강하게 방어
+                targets["momentum_min_long"] = self.baseline["momentum_min_long"]
+                # [P1-I3] bad chop에서도 숏 완화 (절반): baseline + 0.0005
+                targets["momentum_min_short"] = self.baseline["momentum_min_short"] + 0.0005
+                targets["volatility_min"] = self.baseline["volatility_min"] + 0.0008
+                targets["position_pct"] = self.baseline["position_pct"] - 0.0010
 
-        if proposal["leverage_min"] > proposal["leverage_max"] - 1:
-            proposal["leverage_min"] = max(1.0, proposal["leverage_max"] - 1)
-        return proposal
+        # ── [A3] noise 반응: volatility_min 오버라이드 ──
+        if self.state.ema_noise_index > 0.014:
+            targets["volatility_min"] = self.baseline["volatility_min"] + 0.0010
+            targets["position_pct"] = self.baseline["position_pct"] - 0.0010
 
-    def safety_guard(self, proposal: Dict[str, float]) -> Dict[str, float]:
+        # ── [C] TCA 비용 높음 → momentum edge 확대 + 포지션 축소 ──
+        if self.state.ema_tca_bps >= 8.0:
+            targets["position_pct"] = self.baseline["position_pct"] - 0.0015
+            targets["momentum_min_long"] = targets.get("momentum_min_long", self.baseline["momentum_min_long"]) + 0.0004
+            targets["momentum_min_short"] = targets.get("momentum_min_short", self.baseline["momentum_min_short"]) - 0.0004
+
+        # ── [A3] risk_bias → position/leverage KPI ──
+        risk_bias = self._compute_risk_bias(metrics)
+        if risk_bias > 0:
+            targets["position_pct"] = self.baseline["position_pct"] + 0.0010
+            targets["leverage_max"] = self.baseline["leverage_max"] + 1.0
+            targets["leverage_min"] = max(1.0, self.baseline["leverage_min"] - 0.5)
+            targets["max_loss_per_position"] = self.baseline["max_loss_per_position"] + 0.15
+        elif risk_bias < 0:
+            targets["position_pct"] = min(
+                targets.get("position_pct", self.baseline["position_pct"]),
+                self.baseline["position_pct"] - 0.0010
+            )
+            targets["leverage_max"] = max(5.0, self.baseline["leverage_max"] - 1.0)
+            targets["leverage_min"] = self.baseline["leverage_min"] + 0.5
+            targets["max_loss_per_position"] = self.baseline["max_loss_per_position"] - 0.15
+
+        # watch_limit/max_open_symbols 제외 (기존 유지)
+        targets.pop("watch_limit", None)
+        targets.pop("max_open_symbols", None)
+
+        # leverage 역전 방지
+        if "leverage_min" in targets and "leverage_max" in targets:
+            if targets["leverage_min"] > targets["leverage_max"] - 1:
+                targets["leverage_min"] = max(1.0, targets["leverage_max"] - 1)
+
+        # [A1] score 계산 및 best_targets 업데이트
+        score = self._score_targets(targets, metrics, regime)
+        if score > self.state.best_targets_score or not self.state.best_targets:
+            self.state.best_targets = dict(targets)
+            self.state.best_targets_score = score
+
+        self.state.targets = targets
+        return targets
+
+    # ═══════════════════════════════════════════════════════════
+    # apply_targets — v2: EMA 수렴 + ROC 캡 + Shadow-lite
+    # ═══════════════════════════════════════════════════════════
+    def apply_targets(self, metrics: Dict[str, float], regime: str) -> Tuple[Dict[str, float], bool, str]:
+        """기존 apply_or_shadow() 대체.
+        - apply_interval 충족 시에만 실제 적용
+        - EMA 수렴으로 부드러운 파라미터 이동
+        - Shadow-lite: 대폭 변경 시 1사이클 유예
+        """
+        now = time.time()
+        apply_interval = float(getattr(self.config, 'auto_tune_apply_interval_sec', 300))
+
+        # 적용 주기 미충족 → propose만 저장
+        if (now - self.state.last_apply_ts) < apply_interval:
+            return dict(self.current), False, "waiting_apply_interval"
+
+        # 쿨다운 활성 중이면 적용 차단
         if self._cooldown_active():
-            return dict(self.current)
-        # daily tune cap
+            return dict(self.current), False, "cooldown_active"
+
+        # [P1-I1] 최소 신뢰도 체크 — chop 레짐은 0.10, trend는 0.15
+        confidence = metrics.get("confidence", 0.0)
+        MIN_CONF_TREND = 0.15
+        MIN_CONF_CHOP = 0.10
+        MIN_CONF_TO_APPLY = MIN_CONF_CHOP if regime == "chop" else MIN_CONF_TREND
+        if confidence < MIN_CONF_TO_APPLY:
+            self.lifecycle_meta["last_reason"] = f"low_confidence({confidence:.2f}<{MIN_CONF_TO_APPLY})"
+            return dict(self.current), False, f"low_confidence({confidence:.2f})"
+
+        # 일일 튜닝 횟수 체크
         dk = self._day_key()
         if self.state.tune_day_key != dk:
             self.state.tune_day_key = dk
             self.state.tune_count_today = 0
         if self.state.tune_count_today >= self.max_tunes_per_day:
-            self._bump_cooldown()
-            return dict(self.current)
-        # clamp + ROC
-        proposal = clamp_params(proposal, self.current, DEFAULT_LIMITS)
-        # step-limit (legacy)
-        for k, max_d in self.max_step.items():
-            if k not in proposal:
+            return dict(self.current), False, "daily_limit"
+
+        # [A1] best_targets 사용 (score 기반 최적 선택)
+        targets = self.state.best_targets if self.state.best_targets else self.state.targets
+        if not targets:
+            return dict(self.current), False, "no_targets"
+
+        # ── EMA 수렴 적용 ──
+        alpha_entry = float(getattr(self.config, 'tune_alpha_entry', 0.15))
+        alpha_risk = float(getattr(self.config, 'tune_alpha_risk', 0.08))
+
+        alpha_map = {
+            "momentum_min_long": alpha_entry,
+            "momentum_min_short": alpha_entry,
+            "volatility_min": alpha_entry,
+            "position_pct": alpha_risk,
+            "leverage_min": alpha_risk,
+            "leverage_max": alpha_risk,
+            "max_loss_per_position": alpha_risk,
+        }
+
+        # ROC 캡 (risk_limits.py DEFAULT_LIMITS와 정렬)
+        roc_caps = {
+            "momentum_min_long": 0.0006,
+            "momentum_min_short": 0.0006,
+            "volatility_min": 0.0006,
+            "position_pct": 0.0010,
+            "leverage_min": 0.5,
+            "leverage_max": 1.0,
+            "max_loss_per_position": 0.15,
+        }
+
+        new_params = dict(self.current)
+        changed = False
+        max_delta = 0.0  # Shadow-lite 판단용
+
+        for key, target_val in targets.items():
+            if key not in alpha_map:
                 continue
-            cur = self.current.get(k)
-            tgt = proposal.get(k)
-            if not isinstance(cur, (int, float)) or not isinstance(tgt, (int, float)):
+            cur_val = self.current.get(key)
+            if cur_val is None:
                 continue
-            delta = tgt - cur
-            if abs(delta) > max_d:
-                proposal[k] = cur + math.copysign(max_d, delta)
-        # consecutive same-direction guard
-        for k, value in proposal.items():
-            cur = self.current.get(k)
-            if not isinstance(value, (int, float)) or not isinstance(cur, (int, float)):
-                self.state.consecutive_same_dir[k] = 0
-                self.state.last_dir[k] = 0
-                continue
-            delta = value - cur
-            d = sign(delta)
-            prev_d = self.state.last_dir.get(k, 0)
-            if d == 0:
-                self.state.consecutive_same_dir[k] = 0
-                self.state.last_dir[k] = 0
-                continue
-            if d == prev_d:
-                self.state.consecutive_same_dir[k] = self.state.consecutive_same_dir.get(k, 0) + 1
+
+            alpha = alpha_map[key]
+            smoothed = exp_smooth(float(cur_val), float(target_val), alpha)
+
+            # ROC 캡 적용
+            cap = roc_caps.get(key, 999.0)
+            delta = smoothed - float(cur_val)
+            if abs(delta) > cap:
+                smoothed = float(cur_val) + math.copysign(cap, delta)
+
+            if abs(smoothed - float(cur_val)) > 1e-7:
+                changed = True
+                # volatility_min 기준으로 max_delta 추적
+                if key == "volatility_min":
+                    max_delta = max(max_delta, abs(smoothed - float(cur_val)))
+            new_params[key] = smoothed
+
+        if not changed:
+            return dict(self.current), False, "no_change"
+
+        # ── [D] Shadow-lite: 대폭 변경 시 1사이클 유예 ──
+        shadow_threshold = float(getattr(self.config, 'shadow_lite_threshold', 0.0012))
+        if max_delta > shadow_threshold:
+            if not self.state.shadow_lite_deferred:
+                # 첫 번째: 유예
+                self.state.shadow_lite_deferred = True
+                self.state.shadow_lite_deferred_params = dict(new_params)
+                _logger.info("SHADOW_LITE: deferred apply (max_delta=%.6f > threshold=%.6f)",
+                             max_delta, shadow_threshold)
+                return dict(self.current), False, f"shadow_lite_deferred(delta={max_delta:.6f})"
             else:
-                self.state.consecutive_same_dir[k] = 1
-            self.state.last_dir[k] = d
-            if self.state.consecutive_same_dir[k] > 2:
-                self._bump_cooldown()
-                return dict(self.current)
-        # ── Fix: leverage 역전 방지 (step-limit 이후 재발 가능) ──────────
-        # clamp_params 이후 step-limit이 leverage_max를 추가로 낮출 수 있어
-        # leverage_min > leverage_max 역전이 재발생하는 경우를 최종 보정
-        if "leverage_min" in proposal and "leverage_max" in proposal:
-            lev_min = proposal["leverage_min"]
-            lev_max = proposal["leverage_max"]
+                # 두 번째: 유예된 params와 현재 params 비교하여 일관성 확인
+                self.state.shadow_lite_deferred = False
+                self.state.shadow_lite_deferred_params = {}
+        else:
+            self.state.shadow_lite_deferred = False
+            self.state.shadow_lite_deferred_params = {}
+
+        # clamp_params 적용 (절대 범위)
+        new_params = clamp_params(new_params, self.current, DEFAULT_LIMITS)
+
+        # leverage 역전 방지
+        if "leverage_min" in new_params and "leverage_max" in new_params:
+            lev_min = new_params["leverage_min"]
+            lev_max = new_params["leverage_max"]
             if lev_max < 5.0:
                 lev_max = 5.0
             if lev_min > lev_max - 1.0:
                 lev_min = max(1.0, lev_max - 1.0)
-            proposal["leverage_min"] = lev_min
-            proposal["leverage_max"] = lev_max
-        return proposal
+            new_params["leverage_min"] = lev_min
+            new_params["leverage_max"] = lev_max
 
-    # shadow validation gates
+        # 롤백 스택 저장 & 적용
+        self.state.rollback_stack.append((dict(self.current), f"apply@{now:.0f}"))
+        self._log_tune_rationale(new_params, metrics, regime)
+        self._set_lifecycle_stage("active", new_params, regime, metrics, "applied_v2")
+        self._clear_stage("staged")
+        self._clear_stage("proposed")
+        self.state.last_apply_ts = now
+        self._bump_daily_counter()
+
+        # [A1] best_targets 리셋 (적용 후 새로 수집)
+        self.state.best_targets = {}
+        self.state.best_targets_score = 0.0
+
+        self.lifecycle_meta["last_reason"] = "applied"
+        return dict(self.current), True, "applied"
+
+    # ── legacy apply_or_shadow (backward compat) ──────────────
+    def apply_or_shadow(self, proposal: Dict[str, float], metrics: Dict[str, float], regime: str) -> Tuple[Dict[str, float], bool, str]:
+        """v1 호환: 내부적으로 apply_targets 위임."""
+        self.state.targets = proposal
+        return self.apply_targets(metrics, regime)
+
+    # ── shadow validation gates (legacy, 유지) ─────────────────
     def _shadow_should_apply(self) -> bool:
         sh = self.state.shadow
         if len(sh.records) < sh.cycles_required:
@@ -657,12 +939,10 @@ class AutoTuner:
             return False
         if noise_avg > noise0 + 0.002:
             return False
-        # [PATCH-10] EV 기반 하드 조건: 후보 기대값이 0 이상이어야 승격
         cand_snap = sh.perf_candidate.snapshot() if hasattr(sh, 'perf_candidate') else {}
         _cand_exp = cand_snap.get("expectancy", 0.0) if cand_snap else 0.0
         if _cand_exp < 0:
             return False
-        # [PATCH-10] fill_rate 하드 조건: 체결률 80% 미만이면 폐기
         if fill_avg < 0.80:
             return False
         return True
@@ -694,61 +974,64 @@ class AutoTuner:
     def _reset_candidate_performance(self):
         self.state.shadow.perf_candidate.reset()
 
-    def apply_or_shadow(self, proposal: Dict[str, float], metrics: Dict[str, float], regime: str) -> Tuple[Dict[str, float], bool, str]:
-        sh = self.state.shadow
-        confidence = float(metrics.get("confidence", 0.0))
-
-        # ── Fix: 최소 신뢰도 미달 시 적용 차단 ─────────────────────────────
-        # conf < 0.25 이면 파라미터 변경을 적용하지 않음
-        # (risk_bias_down=0.35 보다 낮은 완충 임계값)
-        # chop 레짐에서도 어느 정도 conf 있으면 파라미터 개선 허용
-        # 0.25 → 0.15: 너무 높으면 항상 low_confidence로 막혀 데드락
-        MIN_CONF_TO_APPLY = 0.15
-        if confidence < MIN_CONF_TO_APPLY:
-            self.lifecycle_meta["last_reason"] = f"low_confidence({confidence:.2f}<{MIN_CONF_TO_APPLY})"
-            return dict(self.current), False, f"low_confidence({confidence:.2f}<{MIN_CONF_TO_APPLY})"
-
-        # ── Fix: Shadow 비활성 상태에서 낮은 신뢰도면 재활성화 ───────────────
-        # Shadow가 이전 사이클에서 통과 후 영구 비활성 되는 문제 보정:
-        # 신뢰도가 risk_bias_down 임계값 아래면 Shadow 재활성화하여 재검증
-        SHADOW_REARM_CONF = getattr(self, "risk_bias_down", 0.35)
-        if not sh.active and confidence < SHADOW_REARM_CONF:
-            sh.active = True
-            sh.baseline_snapshot = None
-            sh.records.clear()
-            self._reset_candidate_performance()
-
-        self._set_lifecycle_stage("staged", proposal, regime, metrics, "shadow")
-        if sh.active and sh.baseline_snapshot is None:
-            sh.baseline_snapshot = dict(metrics)
-            self._reset_candidate_performance()
-        if sh.active:
-            sh.records.append({"ts": time.time(), "regime": regime, "proposal": dict(proposal), "metrics": dict(metrics)})
-            if self._shadow_should_apply():
-                self._shadow_log_perf(prefix="Shadow candidate ready")
-                sh.active = False
+    # ── safety_guard (legacy, 하위 호환) ──────────────────────
+    def safety_guard(self, proposal: Dict[str, float]) -> Dict[str, float]:
+        """v1 호환: clamp_params + step-limit + consecutive guard."""
+        if self._cooldown_active():
+            return dict(self.current)
+        dk = self._day_key()
+        if self.state.tune_day_key != dk:
+            self.state.tune_day_key = dk
+            self.state.tune_count_today = 0
+        if self.state.tune_count_today >= self.max_tunes_per_day:
+            self._bump_cooldown()
+            return dict(self.current)
+        proposal = clamp_params(proposal, self.current, DEFAULT_LIMITS)
+        for k, max_d in self.max_step.items():
+            if k not in proposal:
+                continue
+            cur = self.current.get(k)
+            tgt = proposal.get(k)
+            if not isinstance(cur, (int, float)) or not isinstance(tgt, (int, float)):
+                continue
+            delta = tgt - cur
+            if abs(delta) > max_d:
+                proposal[k] = cur + math.copysign(max_d, delta)
+        for k, value in proposal.items():
+            cur = self.current.get(k)
+            if not isinstance(value, (int, float)) or not isinstance(cur, (int, float)):
+                self.state.consecutive_same_dir[k] = 0
+                self.state.last_dir[k] = 0
+                continue
+            delta = value - cur
+            d = sign(delta)
+            prev_d = self.state.last_dir.get(k, 0)
+            if d == 0:
+                self.state.consecutive_same_dir[k] = 0
+                self.state.last_dir[k] = 0
+                continue
+            if d == prev_d:
+                self.state.consecutive_same_dir[k] = self.state.consecutive_same_dir.get(k, 0) + 1
             else:
-                self.lifecycle_meta["last_reason"] = "shadow_validate"
-                return dict(self.current), False, "shadow_validate"
-        self.state.rollback_stack.append((dict(self.current), f"apply@{time.time():.0f}"))
-        # E: why-changed 1-line summary log
-        self._log_tune_rationale(proposal, metrics, regime)
-        snapshot = self._set_lifecycle_stage("active", proposal, regime, metrics, "applied")
-        self._clear_stage("staged")
-        self._clear_stage("proposed")
-        self._bump_daily_counter()
-        sh.records.clear()
-        sh.baseline_snapshot = None
-        self._shadow_log_perf(prefix="Shadow promote")
-        self._reset_candidate_performance()
-        self.lifecycle_meta["last_reason"] = "applied"
-        return dict(snapshot["params"]), True, "applied"
+                self.state.consecutive_same_dir[k] = 1
+            self.state.last_dir[k] = d
+            if self.state.consecutive_same_dir[k] > 2:
+                self._bump_cooldown()
+                return dict(self.current)
+        if "leverage_min" in proposal and "leverage_max" in proposal:
+            lev_min = proposal["leverage_min"]
+            lev_max = proposal["leverage_max"]
+            if lev_max < 5.0:
+                lev_max = 5.0
+            if lev_min > lev_max - 1.0:
+                lev_min = max(1.0, lev_max - 1.0)
+            proposal["leverage_min"] = lev_min
+            proposal["leverage_max"] = lev_max
+        return proposal
 
-    # rollback/brake: PnL only
+    # ── tune rationale logging ─────────────────────────────────
     def _log_tune_rationale(self, proposal: Dict[str, float], metrics: Dict[str, float], regime: str):
-        """E: 파라미터 변경 시 이유를 1줄 요약 로그로 남긴다."""
-        import logging as _log
-        _logger = _log.getLogger(__name__)
+        """파라미터 변경 시 이유를 1줄 요약 로그로 남긴다."""
         conf = metrics.get("confidence", 0.0)
         pnl = metrics.get("pnl_30m", 0.0)
         cost = max(
@@ -759,7 +1042,7 @@ class AutoTuner:
         noise = metrics.get("noise_index", 0.0)
         diffs = []
         for k in ("position_pct", "leverage_max", "leverage_min", "volatility_min",
-                  "momentum_min_long", "max_loss_per_position", "watch_limit"):
+                  "momentum_min_long", "max_loss_per_position"):
             old_v = self.current.get(k)
             new_v = proposal.get(k)
             if old_v is not None and new_v is not None:
@@ -786,14 +1069,18 @@ class AutoTuner:
         if hasattr(self, "notifier") and self.notifier:
             self.notifier("INFO", f"AUTOTUNE_APPLY regime={regime} | {reason_str} | " + " | ".join(diffs[:3]))
 
+    # ── rollback/brake ────────────────────────────────────────
     def evaluate_and_rollback(self, metrics: Dict[str, float]):
-        # ── cooldown guard: 이미 롤백된 직후엔 재롤백 금지 ─────────────────
-        # 같은 음수 pnl 이벤트로 매 4초마다 rollback 폭풍이 발생하는 것을 방지
-        # _bump_cooldown()이 cooldown_until을 설정하므로 이를 재활용
-        if time.time() < self.state.cooldown_until:
+        # v2: config의 rollback_cooldown 사용
+        rollback_cooldown = float(getattr(self.config, 'auto_tune_rollback_cooldown_sec', 600))
+        last_rollback = self.lifecycle_meta.get("last_rollback_at", 0.0)
+        now = time.time()
+
+        # 롤백 쿨다운: 마지막 롤백으로부터 일정 시간 지나야 재롤백 가능
+        if (now - last_rollback) < rollback_cooldown and last_rollback > 0:
             return
+
         if metrics["pnl_30m"] <= -0.02:
-            now = time.time()
             if self.state.rollback_stack:
                 prev, reason = self.state.rollback_stack.pop()
                 self.current = dict(prev)
@@ -804,6 +1091,7 @@ class AutoTuner:
                 self.lifecycle_meta["rollback_reason"] = reason
                 self._bump_cooldown()
                 self.notifier("WARN", f"AutoTune rollback: pnl_30m={metrics['pnl_30m']:.4f} ({reason})")
+                _logger.warning("AUTOTUNE_ROLLBACK: pnl_30m=%.4f reason=%s", metrics['pnl_30m'], reason)
             else:
                 self.current = dict(self.baseline)
                 if self.lifecycle.get("active"):
@@ -813,7 +1101,11 @@ class AutoTuner:
                 self.lifecycle_meta["rollback_reason"] = "baseline"
                 self._bump_cooldown()
                 self.notifier("WARN", f"AutoTune rollback: pnl_30m={metrics['pnl_30m']:.4f} (baseline)")
+                _logger.warning("AUTOTUNE_ROLLBACK: pnl_30m=%.4f reason=baseline", metrics['pnl_30m'])
 
+    # ═══════════════════════════════════════════════════════════
+    # run_cycle — v2: propose/apply 분리
+    # ═══════════════════════════════════════════════════════════
     def run_cycle(
         self,
         returns: List[float],
@@ -844,6 +1136,7 @@ class AutoTuner:
         tca_spread_bps_p90: float | None = None,
         tca_samples: float | None = None,
     ) -> Dict[str, float]:
+        # ① 매 틱: EMA 메트릭 업데이트 포함
         metrics = self.compute_metrics(
             returns,
             rv30,
@@ -873,19 +1166,32 @@ class AutoTuner:
             tca_spread_bps_p90=tca_spread_bps_p90,
             tca_samples=tca_samples,
         )
+
+        # ② 매 틱: shadow perf 기록
         self._shadow_record_metrics(metrics, candidate=self.state.shadow.active)
+
+        # ③ 매 틱: 레짐 분류 (전환 비용 포함)
         regime = self.classify_regime(metrics)
-        proposal = self.propose_adjustment(regime, metrics)
-        proposal = self.safety_guard(proposal)
-        self._set_lifecycle_stage("proposed", proposal, regime, metrics, "safety_guard")
-        params, applied, reason = self.apply_or_shadow(proposal, metrics, regime)
+
+        # ④ 매 틱: 목표값만 저장 (propose)
+        targets = self.propose_adjustment(regime, metrics)
+
+        # ⑤ apply는 간격 충족 시에만 실행 (내부에서 체크)
+        params, applied, reason = self.apply_targets(metrics, regime)
+
+        # ⑥ 롤백 체크
         self.evaluate_and_rollback(metrics)
+
+        # [G] KPI 로그
         self.notifier(
             "WATCH",
             (
-                f"AutoTune v1.0.1 regime={regime} conf={metrics['confidence']:.2f} "
-                f"shadow={self.state.shadow.active} applied={applied} reason={reason} "
-                f"params={params} pnl_30m={metrics['pnl_30m']:.4f} fails={metrics['order_failures']}"
+                f"AutoTune v2 regime={regime} conf={metrics['confidence']:.2f} "
+                f"ema_trend={self.state.ema_trend_score:.3f} ema_noise={self.state.ema_noise_index:.4f} "
+                f"ema_pnl={self.state.ema_pnl:.5f} ema_tca={self.state.ema_tca_bps:.1f} "
+                f"applied={applied} reason={reason} "
+                f"bias_streak={self.state.risk_bias_confirm_streak} "
+                f"pnl_30m={metrics['pnl_30m']:.4f} fails={metrics['order_failures']}"
             ),
         )
         return dict(self.current)

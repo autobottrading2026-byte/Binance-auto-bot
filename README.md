@@ -1,4 +1,4 @@
-# Binance Futures Auto Trading Bot v1.1
+# Binance Futures Auto Trading Bot v1.1.16
 
 바이낸스 선물(USDT-M) 자동 매매 봇입니다. 복합 시그널 분석, AI 기반 자동 튜닝, 다층 리스크 관리 시스템을 탑재하고 있습니다.
 
